@@ -1,6 +1,23 @@
 /*
  * Project name: ESP32_Meteo
  * Author: Alex Fesyuk
+ *
+ * [BME280]  DRIVER: https://github.com/BoschSensortec/BME280_driver
+ * [MH-Z19B] LIBRARY: https://github.com/danielealbano/esp32-air-quality-monitor
+ *
+ * UART 0 - Used for USB-PC transfer [Don't use]
+ *
+ * BME280 connect (I2C):
+ * SDA  - SDA  ESP - [GPIO_NUM_21] (D21)
+ * SCL  - SCL  ESP - [GPIO_NUM_22] (D22)
+ * 3.3v - 3.3v ESP
+ * GND  - GND  ESP
+ *
+ * MH-Z19B connect (UART_NUM_2):
+ * TX   - RX ESP  - [GPIO_NUM_16]  (RX2)
+ * RX   - TX ESP  - [GPIO_NUM_17]  (TX2)
+ * VIN  - VIN (5v) / 3.3v ESP [Need power from board! | Better to use 5v]
+ * GND  - GND ESP
  */
 
 #include <stdio.h>
@@ -26,33 +43,36 @@
 #include "lwip/err.h"
 #include "lwip/sys.h"
 
-#include "bme280.h"                // BME280 driver
+#include "bme280.h"
+#include "mhz19.h"
 #include "nvs_flash.h"
 
 /* ------ Private defines ------ */
-#define UART_TX_PIN                21
-#define UART_RX_PIN                22
+#define UART_TX_PIN                GPIO_NUM_17
+#define UART_RX_PIN                GPIO_NUM_16
 
+#define MHZ19B_BAUDRATE            9600
+#define BUFFER_SIZE_T              1024
 #define TASK_STACK_SIZE            2048
 
 #define TAG_INFO                   "INFO"
 #define TAG_BME280                 "BME280"
+#define TAG_MHZ19B                 "MH-Z19B"
 #define TAG_WIFI                   "Wifi_Station"
 
+#define LED_BOARD                  GPIO_NUM_2
 #define SDA_PIN                    GPIO_NUM_21
 #define SCL_PIN                    GPIO_NUM_22
 
 #define I2C_MASTER_ACK             0
 #define I2C_MASTER_NACK            1
-
-#define LED_BOARD                  GPIO_NUM_2
+#define ESP_MAXIMUM_RETRY          5
 
 #define WIFI_SSID                  "AirPort Extreme"
 #define WIFI_PASS                  "6735s41wty801"
 
 #define WIFI_CONNECTED_BIT         BIT0
 #define WIFI_FAIL_BIT              BIT1
-#define ESP_MAXIMUM_RETRY          5
 
 /* ------ Private functions prototypes ------ */
 void init_UART(void);
@@ -60,6 +80,7 @@ void init_I2C (void);
 void init_GPIO(void);
 void init_NVS (void);
 void init_WIFI_Station(void);
+void init_MH_Z19B(void);
 
 static void event_handler(void* arg,
 		esp_event_base_t event_base,
@@ -78,16 +99,19 @@ int8_t BME280_I2C_Read(uint8_t dev_addr,
 
 void start_message();
 void delay_ms(uint32_t ms);
+void Error_Check_MH_Z19B(mhz19_err_t error);
 
 /* ------ Private Tasks prototypes ------ */
-static void echo_task        (void *arg);
 static void bme280_check_task(void *arg);
 static void led_blink_task   (void *arg);
+static void mhz19b_check_task(void *arg);
 
 /* ------ Private variables ------ */
-const int uart_num = UART_NUM_0;
+int32_t range = 2000;
 static uint8_t retry_try = 0;
 static EventGroupHandle_t s_wifi_event_group; // FreeRTOS event group to signal when we are connected
+QueueHandle_t uart_queue;
+uart_port_t uart_num = UART_NUM_2;
 
 /* ------------------- MAIN function ------------------- */
 void app_main(void)
@@ -95,44 +119,50 @@ void app_main(void)
 	/* ---- Init periphal ---- */
     init_GPIO();
     init_I2C();
+    init_UART();
     init_NVS();
 	init_WIFI_Station();
-	/* ---- Show start message in console ---- */
+	/* ---- Start functions before scheduler ---- */
 	start_message();
-	/* ---- Add tasks ---- */
-	// xTaskCreate(&echo_task, "uart_echo_task", TASK_STACK_SIZE, NULL, 10, NULL);
+	/* ---- Tasks ---- */
 	xTaskCreate(&bme280_check_task, "bme280_check_task", TASK_STACK_SIZE, NULL, 6, NULL);
-	//xTaskCreate(&led_blink_task, "led_blink_task", TASK_STACK_SIZE, NULL, 1, NULL);
+	// xTaskCreate(&led_blink_task, "led_blink_task", TASK_STACK_SIZE, NULL, 1, NULL);
+	xTaskCreate(&mhz19b_check_task, "mhz19b_check_task", TASK_STACK_SIZE, NULL, 25, NULL);
 }
 
 /* ------------------- INIT PERIPHAL ------------------- */
 void init_UART(void)
 {
-	uart_config_t uart_config;
+	/* Init UART for MH-Z19B */
+	uart_config_t uart_config = {
+			.baud_rate = MHZ19B_BAUDRATE,
+			.data_bits = UART_DATA_8_BITS,
+			.parity = UART_PARITY_DISABLE,
+			.stop_bits = UART_STOP_BITS_1,
+			.flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+			.source_clk = UART_SCLK_APB,
+			.rx_flow_ctrl_thresh = 122 // 122
+	};
 
-	uart_config.baud_rate = 115200;
-	uart_config.data_bits = UART_DATA_8_BITS;
-	uart_config.parity = UART_PARITY_DISABLE;
-	uart_config.stop_bits = UART_STOP_BITS_1;
-	uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
-	uart_config.rx_flow_ctrl_thresh = 120;
+	ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
 
-	uart_param_config(uart_num, &uart_config);
-	uart_set_pin(uart_num, UART_TX_PIN, UART_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+	ESP_ERROR_CHECK(uart_set_pin(uart_num,
+				UART_TX_PIN, UART_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-	uart_driver_install(uart_num, 2048, 0, 10, NULL, 0);
+	ESP_ERROR_CHECK(uart_driver_install(uart_num,
+			BUFFER_SIZE_T * 2, BUFFER_SIZE_T * 2, 100, &uart_queue, 0));
 }
 
 void init_I2C(void)
 {
-	i2c_config_t i2c_config;
-
-	i2c_config.mode = I2C_MODE_MASTER;
-	i2c_config.sda_io_num = SDA_PIN;
-	i2c_config.scl_io_num = SCL_PIN;
-	i2c_config.sda_pullup_en = GPIO_PULLUP_ENABLE;
-	i2c_config.scl_pullup_en = GPIO_PULLUP_ENABLE;
-	i2c_config.master.clk_speed = 100000;
+	i2c_config_t i2c_config = {
+			.mode = I2C_MODE_MASTER,
+			.sda_io_num = SDA_PIN,
+			.scl_io_num = SCL_PIN,
+			.sda_pullup_en = GPIO_PULLUP_ENABLE,
+			.scl_pullup_en = GPIO_PULLUP_ENABLE,
+			.master.clk_speed = 100000
+	};
 
 	i2c_param_config(I2C_NUM_0, &i2c_config);
 	i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0);
@@ -169,9 +199,6 @@ void init_WIFI_Station(void)
 	wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
 	ESP_ERROR_CHECK(esp_wifi_init(&config));
 
-//	esp_event_handler_instance_t instance_any_id;
-//	esp_event_handler_instance_t instance_got_ip;
-
 	esp_event_handler_t instance_any_id;
 	esp_event_handler_t instance_got_ip;
 
@@ -182,15 +209,15 @@ void init_WIFI_Station(void)
 			IP_EVENT_STA_GOT_IP, &event_handler, &instance_got_ip));
 
     wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASS,
-			.threshold.authmode = WIFI_AUTH_WPA2_PSK,
-            .pmf_cfg = {
-                .capable = true,
-                .required = false
-            },
-        },
+    		.sta = {
+    				.ssid = WIFI_SSID,
+					.password = WIFI_PASS,
+					.threshold.authmode = WIFI_AUTH_WPA2_PSK,
+					.pmf_cfg = {
+							.capable = true,
+							.required = false
+    				},
+    		},
     };
 
 	ESP_LOGI(TAG_WIFI, "SSID [config]: %s", wifi_config.sta.ssid);
@@ -232,6 +259,17 @@ void init_WIFI_Station(void)
 	vEventGroupDelete(s_wifi_event_group);
 }
 
+void init_MH_Z19B(void)
+{
+	ESP_LOGI(TAG_MHZ19B, "Init MH-Z19B start.");
+
+	mhz19_init(uart_num);
+	mhz19_set_auto_calibration(false);
+	mhz19_set_range(range);
+
+	ESP_LOGI(TAG_MHZ19B, "Init MH-Z19B done.");
+}
+
 /* ------------------- Other functions ------------------- */
 void delay_ms(uint32_t ms)
 {
@@ -257,6 +295,35 @@ void start_message()
             (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
 
     ESP_LOGI(TAG_INFO, "Minimum free heap size: %d bytes", esp_get_minimum_free_heap_size());
+}
+
+void Error_Check_MH_Z19B(mhz19_err_t error)
+{
+	switch(error)
+	{
+		case MHZ19_ERR_NO_DATA:
+			ESP_LOGE(TAG_MHZ19B, "MH-Z19B Error: no data");
+			break;
+
+		case MHZ19_ERR_TIMEOUT:
+			ESP_LOGE(TAG_MHZ19B, "MH-Z19B Error: timeout");
+			break;
+
+		case MHZ19_ERR_INVALID_RESPONSE:
+			ESP_LOGE(TAG_MHZ19B, "MH-Z19B Error: invalid response");
+			break;
+
+		case MHZ19_ERR_UNEXPECTED_CMD:
+			ESP_LOGE(TAG_MHZ19B, "MH-Z19B Error: unexpected command");
+			break;
+
+		case MHZ19_ERR_WRONG_CRC:
+			ESP_LOGE(TAG_MHZ19B, "MH-Z19B Error: wrong checksum");
+			break;
+
+		case MHZ19_ERR_OK:
+			break;
+	}
 }
 
 /* ------------------- BME280 functions ------------------- */
@@ -354,27 +421,6 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 	}
 }
 /* ------------------- TASKS ------------------- */
-static void echo_task(void *arg)
-{
-	init_UART();
-
-	int intr_alloc_flags = 0;
-
-#if CONFIG_UART_ISR_IN_IRAM
-	intr_alloc_flags = ESP_INTR_FLAG_IRAM;
-#endif
-
-	uint8_t* data = (uint8_t*) malloc(1024);
-
-	for(;;)
-	{
-		int len = uart_read_bytes(uart_num, data, 1024, 20 / portTICK_RATE_MS);
-		uart_write_bytes(uart_num, (const char *) data, len);
-	}
-
-	vTaskDelete(NULL);
-}
-
 static void bme280_check_task(void *arg)
 {
 	struct bme280_t bme280 = {
@@ -437,6 +483,37 @@ static void led_blink_task(void *arg)
 
 		gpio_set_level(LED_BOARD, 1);
 		vTaskDelay(1000 / portTICK_RATE_MS);
+	}
+
+	vTaskDelete(NULL);
+}
+
+static void mhz19b_check_task(void *arg)
+{
+	init_MH_Z19B();
+
+	int co2_data;
+	int temp_data;
+
+	mhz19_err_t mhz19b_error;
+
+	for(;;)
+	{
+
+		vTaskDelay(10000 / portTICK_PERIOD_MS);
+
+		mhz19b_error = mhz19_retrieve_data();
+
+		if(mhz19b_error != MHZ19_ERR_OK)
+		{
+			Error_Check_MH_Z19B(mhz19b_error);
+			continue;
+		}
+
+		co2_data  = mhz19_get_co2();
+		temp_data = mhz19_get_temperature();
+
+		ESP_LOGI(TAG_MHZ19B, "CO2: %d | Temperature: %d", co2_data, temp_data);
 	}
 
 	vTaskDelete(NULL);
