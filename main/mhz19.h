@@ -2,7 +2,8 @@
 #define MHZ19_H
 
 #define MHZ19_REQUEST_TIMEOUT_PERIOD 500
-#define MHZ19_PRINT_BUFFER 1
+#define MHZ19_PRINT_BUFFER 0
+#define MHZ19_DATA         9
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,14 @@ enum mhz19_err
 };
 
 typedef enum mhz19_err mhz19_err_t;
+
+struct MHZ19_t {
+	unsigned char _mhz19_response[MHZ19_DATA];
+	mhz19_err_t _mhz19_result;
+	uint8_t _mhz19_cmd;
+	uart_port_t _uart_num;
+
+} MHZ19_data_t;
 
 void mhz19_init(uart_port_t uart_num);
 void mhz19_set_auto_calibration(bool mode);

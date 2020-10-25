@@ -2,12 +2,6 @@
 
 static const char* TAG = "MHZ19";
 
-// TODO: use a struct
-unsigned char _mhz19_response[9];
-mhz19_err_t _mhz19_result = MHZ19_ERR_NO_DATA;
-uint8_t _mhz19_cmd = 0;
-uart_port_t _uart_num;
-
 static uint32_t millis()
 {
     return (uint32_t) (clock() * 1000 / CLOCKS_PER_SEC);
@@ -15,7 +9,9 @@ static uint32_t millis()
 
 void mhz19_init(uart_port_t uart_num)
 {
-    _uart_num = uart_num;
+	MHZ19_data_t._mhz19_result = MHZ19_ERR_NO_DATA;
+	MHZ19_data_t._mhz19_cmd = 0;
+	MHZ19_data_t._uart_num = uart_num;
 }
 
 int mhz19_bytes2int(uint8_t h, uint8_t l)
@@ -60,10 +56,10 @@ void mhz19_prepare_for_write_discard_data_in_uart()
 
 	do
 	{
-		ESP_ERROR_CHECK(uart_get_buffered_data_len(_uart_num, (size_t*)&length));
+		ESP_ERROR_CHECK(uart_get_buffered_data_len(MHZ19_data_t._uart_num, (size_t*)&length));
 		if (length > 0)
 		{
-			uart_read_bytes(_uart_num, buf, length > sizeof(buf) ? sizeof(buf) : length, 100);
+			uart_read_bytes(MHZ19_data_t._uart_num, buf, length > sizeof(buf) ? sizeof(buf) : length, 100);
 		}
 
 		taskYIELD();
@@ -78,16 +74,16 @@ size_t mhz19_write(uint8_t data[], uint8_t len)
     size_t length;
 
     mhz19_prepare_for_write_discard_data_in_uart();
-	length = uart_write_bytes(_uart_num, (const char*)data, 9);
+	length = uart_write_bytes(MHZ19_data_t._uart_num, (const char*)data, 9);
 
- 	ESP_ERROR_CHECK(uart_flush(_uart_num));
+ 	ESP_ERROR_CHECK(uart_flush(MHZ19_data_t._uart_num));
 
     return length;
 }
 
 void mhz19_send_command(uint8_t command, uint8_t b3, uint8_t b4, uint8_t b5, uint8_t b6, uint8_t b7)
 {
-    _mhz19_cmd = command;
+	MHZ19_data_t._mhz19_cmd = command;
 
     uint8_t cmd[9] = { 0xFF, 0x01, command, b3, b4, b5, b6, b7, 0x00 };
     cmd[8] = mhz19_calc_crc(cmd);
@@ -105,7 +101,7 @@ size_t mhz19_read(uint8_t data[], uint8_t len)
 
 	do
 	{
-		ESP_ERROR_CHECK(uart_get_buffered_data_len(_uart_num, (size_t*)&length));
+		ESP_ERROR_CHECK(uart_get_buffered_data_len(MHZ19_data_t._uart_num, (size_t*)&length));
 
 		if (millis() - start_millis >= MHZ19_REQUEST_TIMEOUT_PERIOD) 
 		{
@@ -117,7 +113,7 @@ size_t mhz19_read(uint8_t data[], uint8_t len)
 	}
 	while(length <= 0);
     
-	length = uart_read_bytes(_uart_num, data, len, 100);
+	length = uart_read_bytes(MHZ19_data_t._uart_num, data, len, 100);
     mhz19_print_buffer(0, data);
 
     return length;
@@ -129,32 +125,32 @@ mhz19_err_t mhz19_receive_response(uint8_t cmd[9])
 
     if (err < MHZ19_ERR_OK)
     {
-        _mhz19_result = err;
+    	MHZ19_data_t._mhz19_result = err;
     }
     else if (cmd[0] != 0xFF)
     {
-        _mhz19_result = MHZ19_ERR_INVALID_RESPONSE;
+    	MHZ19_data_t._mhz19_result = MHZ19_ERR_INVALID_RESPONSE;
     }
-    else if (cmd[1] != _mhz19_cmd)
+    else if (cmd[1] != MHZ19_data_t._mhz19_cmd)
     {
-        _mhz19_result = MHZ19_ERR_UNEXPECTED_CMD;
+    	MHZ19_data_t._mhz19_result = MHZ19_ERR_UNEXPECTED_CMD;
     }
     else if (cmd[8] != mhz19_calc_crc(cmd))
     {
-        _mhz19_result = MHZ19_ERR_WRONG_CRC;
+    	MHZ19_data_t._mhz19_result = MHZ19_ERR_WRONG_CRC;
     }
     else
     {
-        _mhz19_result = MHZ19_ERR_OK;
+    	MHZ19_data_t._mhz19_result = MHZ19_ERR_OK;
     }
     
-    return _mhz19_result;
+    return MHZ19_data_t._mhz19_result;
 }
 
 mhz19_err_t mhz19_retrieve_data()
 {
     mhz19_send_command(0x86, 0, 0, 0, 0, 0);
-    return mhz19_receive_response(_mhz19_response);
+    return mhz19_receive_response(MHZ19_data_t._mhz19_response);
 }
 
 void mhz19_set_auto_calibration(bool mode)
@@ -178,22 +174,23 @@ void mhz19_set_range(int range)
 
 int mhz19_get_co2()
 {
-    if (_mhz19_result == MHZ19_ERR_OK)
+    if (MHZ19_data_t._mhz19_result == MHZ19_ERR_OK)
     {
         // TODO: Cast the data to uint16_t instead of using an ad hoc function that doest the same
-        return mhz19_bytes2int(_mhz19_response[2], _mhz19_response[3]);
+        return mhz19_bytes2int(MHZ19_data_t._mhz19_response[2],
+        		MHZ19_data_t._mhz19_response[3]);
     }
 
-    return _mhz19_result;
+    return MHZ19_data_t._mhz19_result;
 }
 
 int mhz19_get_temperature()
 {
-    if (_mhz19_result == MHZ19_ERR_OK)
+    if (MHZ19_data_t._mhz19_result == MHZ19_ERR_OK)
     {
-        int value = (int)_mhz19_response[4];
+        int value = (int)MHZ19_data_t._mhz19_response[4];
         return value - 40;
     }
 
-    return _mhz19_result;
+    return MHZ19_data_t._mhz19_result;
 }

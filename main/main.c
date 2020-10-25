@@ -2,10 +2,10 @@
  * Project name: ESP32_Meteo
  * Author: Alex Fesyuk
  *
- * [BME280]  DRIVER: https://github.com/BoschSensortec/BME280_driver
+ * [BME280]  DRIVER:  https://github.com/BoschSensortec/BME280_driver
  * [MH-Z19B] LIBRARY: https://github.com/danielealbano/esp32-air-quality-monitor
  *
- * UART 0 - Used for USB-PC transfer [Don't use]
+ * UART_NUM_0 - Used for USB-PC transfer [Don't use]
  *
  * BME280 connect (I2C):
  * SDA  - SDA  ESP - [GPIO_NUM_21] (D21)
@@ -82,12 +82,18 @@ void init_NVS (void);
 void init_WIFI_Station(void);
 void init_MH_Z19B(void);
 
+void start_message();
+void delay_ms(uint32_t ms);
+void Error_Check_MH_Z19B(mhz19_err_t error);
+
+int32_t init_BME280(void);
+
 static void event_handler(void* arg,
 		esp_event_base_t event_base,
 		int32_t event_id,
 		void* event_data);
 
-int8_t BME_I2C_Write(uint8_t dev_addr,
+int8_t BME280_I2C_Write(uint8_t dev_addr,
 		uint8_t reg_addr,
 		uint8_t* reg_data,
 		uint8_t count);
@@ -97,22 +103,28 @@ int8_t BME280_I2C_Read(uint8_t dev_addr,
 		uint8_t* reg_data,
 		uint8_t count);
 
-void start_message();
-void delay_ms(uint32_t ms);
-void Error_Check_MH_Z19B(mhz19_err_t error);
-
 /* ------ Private Tasks prototypes ------ */
 static void bme280_check_task(void *arg);
-static void led_blink_task   (void *arg);
 static void mhz19b_check_task(void *arg);
 
 /* ------ Private variables ------ */
-int32_t range = 2000;
-static uint8_t retry_try = 0;
-static EventGroupHandle_t s_wifi_event_group; // FreeRTOS event group to signal when we are connected
-QueueHandle_t uart_queue;
-uart_port_t uart_num = UART_NUM_2;
+struct bme280_t bme280;
 
+static uint8_t retry_try = 0;
+
+int32_t mhz19b_temperature = 0;
+int32_t mhz19b_co2 = 0;
+int32_t range = 2000;
+
+double bme280_temperature = 0;
+double bme280_huminidy = 0;
+double bme280_pressure = 0;
+
+static EventGroupHandle_t s_wifi_event_group; // FreeRTOS event group to signal when we are connected
+
+QueueHandle_t uart_queue;
+
+uart_port_t uart_num = UART_NUM_2;
 /* ------------------- MAIN function ------------------- */
 void app_main(void)
 {
@@ -126,11 +138,10 @@ void app_main(void)
 	start_message();
 	/* ---- Tasks ---- */
 	xTaskCreate(&bme280_check_task, "bme280_check_task", TASK_STACK_SIZE, NULL, 6, NULL);
-	// xTaskCreate(&led_blink_task, "led_blink_task", TASK_STACK_SIZE, NULL, 1, NULL);
 	xTaskCreate(&mhz19b_check_task, "mhz19b_check_task", TASK_STACK_SIZE, NULL, 25, NULL);
 }
 
-/* ------------------- INIT PERIPHAL ------------------- */
+/* ------------------- Init Periphal ------------------- */
 void init_UART(void)
 {
 	/* Init UART for MH-Z19B */
@@ -170,8 +181,9 @@ void init_I2C(void)
 
 void init_GPIO(void)
 {
-	gpio_pad_select_gpio(GPIO_NUM_2);
-	gpio_set_direction(GPIO_NUM_2, GPIO_MODE_OUTPUT);
+	gpio_pad_select_gpio(LED_BOARD);
+	gpio_set_direction(LED_BOARD, GPIO_MODE_OUTPUT);
+	//gpio_set_level(LED_BOARD, 0);
 }
 
 void init_NVS(void)
@@ -270,6 +282,31 @@ void init_MH_Z19B(void)
 	ESP_LOGI(TAG_MHZ19B, "Init MH-Z19B done.");
 }
 
+int32_t init_BME280(void)
+{
+	ESP_LOGI(TAG_BME280, "Init BME280 start.");
+
+	/* Init BME280 struct */
+	bme280.bus_write  = BME280_I2C_Write;
+	bme280.bus_read   = BME280_I2C_Read;
+	bme280.dev_addr   = BME280_I2C_ADDRESS1;
+	bme280.delay_msec = delay_ms;
+
+	int32_t com_rslt = bme280_init(&bme280);
+
+	/* Set 16x oversampling for more correct data */
+	com_rslt += bme280_set_oversamp_pressure(BME280_OVERSAMP_16X);
+	com_rslt += bme280_set_oversamp_temperature(BME280_OVERSAMP_16X);
+	com_rslt += bme280_set_oversamp_humidity(BME280_OVERSAMP_16X);
+
+	com_rslt += bme280_set_filter(BME280_FILTER_COEFF_OFF);
+
+	ESP_LOGI(TAG_BME280, "Init BME280 done.");
+
+	return (int32_t) com_rslt;
+}
+
+
 /* ------------------- Other functions ------------------- */
 void delay_ms(uint32_t ms)
 {
@@ -327,7 +364,7 @@ void Error_Check_MH_Z19B(mhz19_err_t error)
 }
 
 /* ------------------- BME280 functions ------------------- */
-int8_t BME_I2C_Write(uint8_t dev_addr, uint8_t reg_addr, uint8_t* reg_data, uint8_t cnt)
+int8_t BME280_I2C_Write(uint8_t dev_addr, uint8_t reg_addr, uint8_t* reg_data, uint8_t cnt)
 {
 	int32_t iError = BME280_INIT_VALUE;
 
@@ -423,66 +460,40 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 /* ------------------- TASKS ------------------- */
 static void bme280_check_task(void *arg)
 {
-	struct bme280_t bme280 = {
-			.bus_write  = BME_I2C_Write,
-			.bus_read   = BME280_I2C_Read,
-			.dev_addr   = BME280_I2C_ADDRESS1,
-			.delay_msec = delay_ms
-	};
+	int32_t com_rslt = init_BME280();
 
-	int32_t com_rslt = bme280_init(&bme280);
+	int32_t v_uncomp_pressure_s32;
+	int32_t v_uncomp_temperature_s32;
+	int32_t v_uncomp_humidity_s32;
 
-	/* Set 16x oversampling for more correct data */
-	com_rslt += bme280_set_oversamp_pressure(BME280_OVERSAMP_16X);
-	com_rslt += bme280_set_oversamp_temperature(BME280_OVERSAMP_16X);
-	com_rslt += bme280_set_oversamp_humidity(BME280_OVERSAMP_16X);
-
-	com_rslt += bme280_set_filter(BME280_FILTER_COEFF_OFF);
-
-	if(com_rslt == SUCCESS)
-	{
-		int32_t v_uncomp_pressure_s32;
-		int32_t v_uncomp_temperature_s32;
-		int32_t v_uncomp_humidity_s32;
-
-		for(;;)
-		{
-			com_rslt = bme280_get_forced_uncomp_pressure_temperature_humidity(
-					   &v_uncomp_pressure_s32, &v_uncomp_temperature_s32, &v_uncomp_humidity_s32);
-
-			if(com_rslt == SUCCESS)
-			{
-				ESP_LOGI(TAG_BME280, "%.2f C | %.0f hPa | %.2f %%",
-					bme280_compensate_temperature_double(v_uncomp_temperature_s32),
-					bme280_compensate_pressure_double(v_uncomp_pressure_s32) / 100, // Pa -> hPa
-					bme280_compensate_humidity_double(v_uncomp_humidity_s32));
-			}
-			else
-			{
-				ESP_LOGI(TAG_BME280, "Measure error | code: %d", com_rslt);
-			}
-
-			vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-		}
-	}
-	else
-	{
-		ESP_LOGE(TAG_BME280, "Init or setting error | Code: %d", com_rslt);
-	}
-
-	vTaskDelete(NULL);
-}
-
-static void led_blink_task(void *arg)
-{
 	for(;;)
 	{
-		gpio_set_level(LED_BOARD, 0);
-		vTaskDelay(1000 / portTICK_RATE_MS);
+		if(com_rslt != SUCCESS)
+		{
+			ESP_LOGE(TAG_BME280, "Init or setting error | Code: %d", com_rslt);
+			com_rslt = init_BME280();
+			vTaskDelay(5000 / portTICK_PERIOD_MS);
+			continue;
+		}
 
-		gpio_set_level(LED_BOARD, 1);
-		vTaskDelay(1000 / portTICK_RATE_MS);
+		com_rslt = bme280_get_forced_uncomp_pressure_temperature_humidity(
+				&v_uncomp_pressure_s32, &v_uncomp_temperature_s32, &v_uncomp_humidity_s32);
+
+		if(com_rslt == SUCCESS)
+		{
+			bme280_temperature = bme280_compensate_temperature_double(v_uncomp_temperature_s32);
+			bme280_pressure    = bme280_compensate_pressure_double(v_uncomp_pressure_s32) / 100; // Pa -> hPa
+			bme280_huminidy    = bme280_compensate_humidity_double(v_uncomp_humidity_s32);
+
+			ESP_LOGI(TAG_BME280, "%.2f C | %.0f hPa | %.2f %%",
+					bme280_temperature, bme280_pressure, bme280_huminidy);
+		}
+		else
+		{
+			ESP_LOGE(TAG_BME280, "Measure error | code: %d", com_rslt);
+		}
+
+		vTaskDelay(10000 / portTICK_PERIOD_MS);
 	}
 
 	vTaskDelete(NULL);
@@ -492,14 +503,10 @@ static void mhz19b_check_task(void *arg)
 {
 	init_MH_Z19B();
 
-	int co2_data;
-	int temp_data;
-
 	mhz19_err_t mhz19b_error;
 
 	for(;;)
 	{
-
 		vTaskDelay(10000 / portTICK_PERIOD_MS);
 
 		mhz19b_error = mhz19_retrieve_data();
@@ -510,10 +517,10 @@ static void mhz19b_check_task(void *arg)
 			continue;
 		}
 
-		co2_data  = mhz19_get_co2();
-		temp_data = mhz19_get_temperature();
+		mhz19b_co2  = mhz19_get_co2();
+		mhz19b_temperature = mhz19_get_temperature();
 
-		ESP_LOGI(TAG_MHZ19B, "CO2: %d | Temperature: %d", co2_data, temp_data);
+		ESP_LOGI(TAG_MHZ19B, "CO2: %d | Temperature: %d", mhz19b_co2, mhz19b_temperature);
 	}
 
 	vTaskDelete(NULL);
