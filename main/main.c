@@ -18,6 +18,30 @@
  * RX   - TX ESP  - [GPIO_NUM_17]  (TX2)
  * VIN  - VIN (5v) / 3.3v ESP [Need power from board! | Better to use 5v]
  * GND  - GND ESP
+ *
+ * HTTP Requests:
+ * 1. GET     -  Get data from server (Database)
+ * 2. POST    -  Insert data into server (Database)                     *
+ * 3. PUT     -  Insert and override data on server (Database)          *
+ * 4. DELETE  -  Delete data from server (Database)                     *
+ * 5. CONNECT -  Establish a tunnel to the server specified in the URI  *
+ * 6. OPTION  -  Get parameters for connecting to the server
+ * 7. TRACE   -  Can track what is happening with your requests
+ *
+ * HTTP Response status codes:
+ * 200 - OK
+ * 201 - Created
+ * 202 - Accepted
+ * 204 - No Content
+ *
+ * 400 - Bad Request
+ * 401 - Unauthorized
+ * 403 - Forbidden
+ * 404 - Not Found
+ * 405 - Method Not Allowed
+ * 406 - Not Acceptable
+ * 408 - Request Timeout
+ * 429 - Too Many Requests
  */
 
 #include <stdio.h>
@@ -47,6 +71,9 @@
 #include "mhz19.h"
 #include "nvs_flash.h"
 
+#include "esp_http_client.h"
+#include "esp_tls.h"
+#include "esp_netif.h"
 /* ------ Private defines ------ */
 #define UART_TX_PIN                GPIO_NUM_17
 #define UART_RX_PIN                GPIO_NUM_16
@@ -54,11 +81,15 @@
 #define MHZ19B_BAUDRATE            9600
 #define BUFFER_SIZE_T              1024
 #define TASK_STACK_SIZE            2048
+#define HTTP_TASK_STACK_SIZE       8192
+#define MAX_HTTP_RECV_BUFFER       512
+#define MAX_HTTP_OUTPUT_BUFFER     2048
 
 #define TAG_INFO                   "INFO"
 #define TAG_BME280                 "BME280"
 #define TAG_MHZ19B                 "MH-Z19B"
 #define TAG_WIFI                   "Wifi_Station"
+#define TAG_HTTP                   "HTTP_Client"
 
 #define LED_BOARD                  GPIO_NUM_2
 #define SDA_PIN                    GPIO_NUM_21
@@ -81,17 +112,24 @@ void init_GPIO(void);
 void init_NVS (void);
 void init_WIFI_Station(void);
 void init_MH_Z19B(void);
+int32_t init_BME280(void);
 
 void start_message();
 void delay_ms(uint32_t ms);
 void Error_Check_MH_Z19B(mhz19_err_t error);
+void Message_HTTP_Client(esp_http_client_method_t method);
 
-int32_t init_BME280(void);
+static void http_request(esp_http_client_handle_t client,
+                  esp_http_client_method_t method,
+                  char* url, char* key, char* value);
 
 static void event_handler(void* arg,
 		esp_event_base_t event_base,
 		int32_t event_id,
 		void* event_data);
+
+esp_err_t _http_event_handler(
+		esp_http_client_event_t *evt);
 
 int8_t BME280_I2C_Write(uint8_t dev_addr,
 		uint8_t reg_addr,
@@ -106,7 +144,7 @@ int8_t BME280_I2C_Read(uint8_t dev_addr,
 /* ------ Private Tasks prototypes ------ */
 static void bme280_check_task(void *arg);
 static void mhz19b_check_task(void *arg);
-
+static void http_request_task(void *arg);
 /* ------ Private variables ------ */
 struct bme280_t bme280;
 
@@ -120,11 +158,21 @@ double bme280_temperature = 0;
 double bme280_huminidy = 0;
 double bme280_pressure = 0;
 
+char local_response_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};
+
 static EventGroupHandle_t s_wifi_event_group; // FreeRTOS event group to signal when we are connected
 
 QueueHandle_t uart_queue;
 
 uart_port_t uart_num = UART_NUM_2;
+
+/* Requests templates */
+const char* bme280_temp_req  = "{\"temp_bme\":\"";
+const char* bme280_hum_req   = "{\"hum_bme\":\"";
+const char* bme280_press_req = "{\"press_bme\":\"";
+const char* mhz19b_temp_req   = "{\"temp_zh\":\"";
+const char* mhz19b_co2_req    = "{\"co2_zh\":\"";
+const char* end_of_req       = "\"}";
 /* ------------------- MAIN function ------------------- */
 void app_main(void)
 {
@@ -137,6 +185,7 @@ void app_main(void)
 	/* ---- Start functions before scheduler ---- */
 	start_message();
 	/* ---- Tasks ---- */
+ 	xTaskCreate(&http_request_task, "http_test_task", TASK_STACK_SIZE, NULL, 5, NULL); //TODO: Change STACK Size for this task
 	xTaskCreate(&bme280_check_task, "bme280_check_task", TASK_STACK_SIZE, NULL, 6, NULL);
 	xTaskCreate(&mhz19b_check_task, "mhz19b_check_task", TASK_STACK_SIZE, NULL, 25, NULL);
 }
@@ -152,7 +201,7 @@ void init_UART(void)
 			.stop_bits = UART_STOP_BITS_1,
 			.flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
 			.source_clk = UART_SCLK_APB,
-			.rx_flow_ctrl_thresh = 122 // 122
+			.rx_flow_ctrl_thresh = 122
 	};
 
 	ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
@@ -271,6 +320,21 @@ void init_WIFI_Station(void)
 	vEventGroupDelete(s_wifi_event_group);
 }
 
+esp_http_client_handle_t init_HTTP(void)
+{
+	esp_http_client_config_t http_config = {
+			.host = "httpbin.org",
+			.path = "/get",
+			.query = "esp",
+			.event_handler = _http_event_handler,
+			.user_data = local_response_buffer
+	};
+
+	esp_http_client_handle_t client = esp_http_client_init(&http_config);
+
+	return client;
+}
+
 void init_MH_Z19B(void)
 {
 	ESP_LOGI(TAG_MHZ19B, "Init MH-Z19B start.");
@@ -305,7 +369,6 @@ int32_t init_BME280(void)
 
 	return (int32_t) com_rslt;
 }
-
 
 /* ------------------- Other functions ------------------- */
 void delay_ms(uint32_t ms)
@@ -359,6 +422,36 @@ void Error_Check_MH_Z19B(mhz19_err_t error)
 			break;
 
 		case MHZ19_ERR_OK:
+			break;
+	}
+}
+
+void Message_HTTP_Client(esp_http_client_method_t method)
+{
+	switch(method)
+	{
+		case HTTP_METHOD_GET:
+			ESP_LOGI(TAG_HTTP, "HTTP Request: GET");
+			break;
+
+		case HTTP_METHOD_POST:
+			ESP_LOGI(TAG_HTTP, "HTTP Request: POST");
+			break;
+
+		case HTTP_METHOD_PUT:
+			ESP_LOGI(TAG_HTTP, "HTTP Request: PUT");
+			break;
+
+		case HTTP_METHOD_DELETE:
+			ESP_LOGI(TAG_HTTP, "HTTP Request: DELETE");
+			break;
+
+		case HTTP_METHOD_HEAD:
+			ESP_LOGI(TAG_HTTP, "HTTP Request: HEAD");
+			break;
+
+		default:
+			ESP_LOGE(TAG_HTTP, "HTTP Request: OTHER [CHECK FOR AVAILABLE METHODS]");
 			break;
 	}
 }
@@ -457,6 +550,143 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 		xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 	}
 }
+
+/* ------------------- HTTP functions / handlers ------------------- */
+esp_err_t _http_event_handler(esp_http_client_event_t *evt)
+{
+	static char* output_buffer;
+	static int output_len;
+
+	switch(evt->event_id)
+	{
+		case HTTP_EVENT_ERROR:
+			ESP_LOGD(TAG_HTTP, "HTTP_EVENT_ERROR");
+			break;
+
+		case HTTP_EVENT_ON_CONNECTED:
+			ESP_LOGD(TAG_HTTP, "HTTP_EVENT_ON_CONNECTED");
+			break;
+
+		case HTTP_EVENT_HEADER_SENT:
+			ESP_LOGD(TAG_HTTP, "HTTP_EVENT_HEADER_SENT");
+			break;
+
+		case HTTP_EVENT_ON_HEADER:
+			ESP_LOGD(TAG_HTTP, "HTTP_EVENT_ON_HEADER, key=%s, value=%s",
+					evt->header_key, evt->header_value);
+			break;
+
+		case HTTP_EVENT_ON_DATA:
+			ESP_LOGD(TAG_HTTP, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+			if(!esp_http_client_is_chunked_response(evt->client))
+			{
+				if(evt->user_data)
+				{
+					memcpy(evt->user_data + output_len, evt->data, evt->data_len);
+				}
+				else
+				{
+					if(output_buffer == NULL)
+					{
+						output_buffer = (char*) malloc (esp_http_client_get_content_length(evt->client));
+						output_len = 0;
+						if(output_buffer == NULL)
+						{
+							ESP_LOGE(TAG_HTTP, "Failed to allocate memory for output buffer");
+							return ESP_FAIL;
+						}
+					}
+					memcpy(output_buffer + output_len, evt->data, evt->data_len);
+				}
+				output_len += evt->data_len;
+			}
+			break;
+
+		case HTTP_EVENT_ON_FINISH:
+			ESP_LOGD(TAG_HTTP, "HTTP_EVENT_ON_FINISH");
+			if(output_buffer != NULL)
+			{
+				ESP_LOG_BUFFER_HEX(TAG_HTTP, output_buffer, output_len);
+				free(output_buffer);
+				output_buffer = NULL;
+			}
+			output_len = 0;
+			break;
+
+		case HTTP_EVENT_DISCONNECTED:
+			ESP_LOGI(TAG_HTTP, "HTTP_EVENT_DISCONNECTED");
+			int mbedtls_err = 0;
+			esp_err_t err = esp_tls_get_and_clear_last_error(evt->data, &mbedtls_err, NULL);
+			if(err != 0)
+			{
+				if(output_buffer != NULL)
+				{
+					free(output_buffer);
+					output_buffer = NULL;
+				}
+				output_len = 0;
+				ESP_LOGI(TAG_HTTP, "Last ESP Error code: 0x%x", err);
+				ESP_LOGI(TAG_HTTP, "Last MbedTLS failure: 0x%x", mbedtls_err);
+			}
+			break;
+	}
+
+	return ESP_OK;
+}
+
+static void http_request(esp_http_client_handle_t client,
+                         esp_http_client_method_t method,
+                         char* url, char* key, char* value)
+{
+	char* post_data = NULL;
+
+	/* Set config */
+	esp_http_client_set_url(client, url);
+	esp_http_client_set_method(client, method);
+
+	/* If method PUT or POST -> we need to reconfigure http header */
+	if(method == HTTP_METHOD_POST || method == HTTP_METHOD_PUT)
+	{
+		post_data = (char*) malloc (strlen(key) + strlen(value) + strlen(end_of_req) + 1);
+
+		sprintf(post_data, "%s%s%s", key, value, end_of_req);
+
+		ESP_LOGI(TAG_HTTP, "Post_data request = %s", post_data);
+
+		esp_http_client_set_header(client, "Content-Type", "application/json");
+		esp_http_client_set_post_field(client, post_data, strlen(post_data));
+	}
+
+	/* Start HTTP request */
+	esp_err_t err = esp_http_client_perform(client);
+
+	Message_HTTP_Client(method);
+
+	if(err == ESP_OK)
+	{
+		ESP_LOGI(TAG_HTTP, "HTTP Status = %d, content_length = %d",
+				esp_http_client_get_status_code(client),
+				esp_http_client_get_content_length(client));
+	}
+	else
+	{
+		ESP_LOGE(TAG_HTTP, "HTTP Request failed: %s",
+				esp_err_to_name(err));
+	}
+
+	/* If method PUT or POST -> check local response buffer */
+	if(method == HTTP_METHOD_GET || method == HTTP_METHOD_HEAD)
+	{
+		ESP_LOG_BUFFER_HEX(TAG_HTTP, local_response_buffer, strlen(local_response_buffer));
+	}
+
+	if(post_data)
+	{
+		free(post_data);
+		ESP_LOGI(TAG_HTTP, "Post_data request is free.");
+	}
+}
+
 /* ------------------- TASKS ------------------- */
 static void bme280_check_task(void *arg)
 {
@@ -505,6 +735,8 @@ static void mhz19b_check_task(void *arg)
 
 	mhz19_err_t mhz19b_error;
 
+	//TODO: Add delay
+
 	for(;;)
 	{
 		vTaskDelay(10000 / portTICK_PERIOD_MS);
@@ -521,6 +753,21 @@ static void mhz19b_check_task(void *arg)
 		mhz19b_temperature = mhz19_get_temperature();
 
 		ESP_LOGI(TAG_MHZ19B, "CO2: %d | Temperature: %d", mhz19b_co2, mhz19b_temperature);
+	}
+
+	vTaskDelete(NULL);
+}
+
+static void http_request_task(void *arg)
+{
+	esp_http_client_handle_t client = init_HTTP();
+
+	vTaskDelay(2000 / portTICK_PERIOD_MS);
+
+	for(;;)
+	{
+		// TODO: Create and send HTTP request to server
+		vTaskDelay(30000 / portTICK_PERIOD_MS);
 	}
 
 	vTaskDelete(NULL);

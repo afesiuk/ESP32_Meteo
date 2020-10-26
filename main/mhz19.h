@@ -32,7 +32,6 @@ struct MHZ19_t {
 	mhz19_err_t _mhz19_result;
 	uint8_t _mhz19_cmd;
 	uart_port_t _uart_num;
-
 } MHZ19_data_t;
 
 void mhz19_init(uart_port_t uart_num);
