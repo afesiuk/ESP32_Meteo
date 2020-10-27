@@ -75,15 +75,13 @@
 #include "esp_tls.h"
 #include "esp_netif.h"
 /* ------ Private defines ------ */
-#define UART_TX_PIN                GPIO_NUM_17
-#define UART_RX_PIN                GPIO_NUM_16
-
 #define MHZ19B_BAUDRATE            9600
 #define BUFFER_SIZE_T              1024
 #define TASK_STACK_SIZE            2048
 #define HTTP_TASK_STACK_SIZE       8192
 #define MAX_HTTP_RECV_BUFFER       512
 #define MAX_HTTP_OUTPUT_BUFFER     2048
+#define SIZE_FOR_DATA              26
 
 #define TAG_INFO                   "INFO"
 #define TAG_BME280                 "BME280"
@@ -92,8 +90,12 @@
 #define TAG_HTTP                   "HTTP_Client"
 
 #define LED_BOARD                  GPIO_NUM_2
+
 #define SDA_PIN                    GPIO_NUM_21
 #define SCL_PIN                    GPIO_NUM_22
+
+#define UART_TX_PIN                GPIO_NUM_17
+#define UART_RX_PIN                GPIO_NUM_16
 
 #define I2C_MASTER_ACK             0
 #define I2C_MASTER_NACK            1
@@ -101,6 +103,7 @@
 
 #define WIFI_SSID                  "AirPort Extreme"
 #define WIFI_PASS                  "6735s41wty801"
+#define URL_POST                   "http://httpbin.org/post"
 
 #define WIFI_CONNECTED_BIT         BIT0
 #define WIFI_FAIL_BIT              BIT1
@@ -155,8 +158,8 @@ int32_t mhz19b_co2 = 0;
 int32_t range = 2000;
 
 double bme280_temperature = 0;
-double bme280_huminidy = 0;
-double bme280_pressure = 0;
+double bme280_humidity    = 0;
+double bme280_pressure    = 0;
 
 char local_response_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};
 
@@ -167,12 +170,12 @@ QueueHandle_t uart_queue;
 uart_port_t uart_num = UART_NUM_2;
 
 /* Requests templates */
-const char* bme280_temp_req  = "{\"temp_bme\":\"";
-const char* bme280_hum_req   = "{\"hum_bme\":\"";
-const char* bme280_press_req = "{\"press_bme\":\"";
-const char* mhz19b_temp_req   = "{\"temp_zh\":\"";
-const char* mhz19b_co2_req    = "{\"co2_zh\":\"";
-const char* end_of_req       = "\"}";
+const char* bme280_temp_req   = "{\"temp_bme\":\"";
+const char* bme280_hum_req    = "{\"hum_bme\":\"";
+const char* bme280_press_req  = "{\"press_bme\":\"";
+const char* mhz19b_temp_req   = "{\"temp_mhz\":\"";
+const char* mhz19b_co2_req    = "{\"co2_mhz\":\"";
+const char* end_of_req        = "\"}";
 /* ------------------- MAIN function ------------------- */
 void app_main(void)
 {
@@ -185,7 +188,7 @@ void app_main(void)
 	/* ---- Start functions before scheduler ---- */
 	start_message();
 	/* ---- Tasks ---- */
- 	xTaskCreate(&http_request_task, "http_test_task", TASK_STACK_SIZE, NULL, 5, NULL); //TODO: Change STACK Size for this task
+ 	xTaskCreate(&http_request_task, "http_test_task", TASK_STACK_SIZE * 2, NULL, 5, NULL);
 	xTaskCreate(&bme280_check_task, "bme280_check_task", TASK_STACK_SIZE, NULL, 6, NULL);
 	xTaskCreate(&mhz19b_check_task, "mhz19b_check_task", TASK_STACK_SIZE, NULL, 25, NULL);
 }
@@ -455,7 +458,6 @@ void Message_HTTP_Client(esp_http_client_method_t method)
 			break;
 	}
 }
-
 /* ------------------- BME280 functions ------------------- */
 int8_t BME280_I2C_Write(uint8_t dev_addr, uint8_t reg_addr, uint8_t* reg_data, uint8_t cnt)
 {
@@ -638,7 +640,7 @@ static void http_request(esp_http_client_handle_t client,
                          esp_http_client_method_t method,
                          char* url, char* key, char* value)
 {
-	char* post_data = NULL;
+	char* post_data = NULL; // TODO: Check after test
 
 	/* Set config */
 	esp_http_client_set_url(client, url);
@@ -713,10 +715,10 @@ static void bme280_check_task(void *arg)
 		{
 			bme280_temperature = bme280_compensate_temperature_double(v_uncomp_temperature_s32);
 			bme280_pressure    = bme280_compensate_pressure_double(v_uncomp_pressure_s32) / 100; // Pa -> hPa
-			bme280_huminidy    = bme280_compensate_humidity_double(v_uncomp_humidity_s32);
+			bme280_humidity    = bme280_compensate_humidity_double(v_uncomp_humidity_s32);
 
 			ESP_LOGI(TAG_BME280, "%.2f C | %.0f hPa | %.2f %%",
-					bme280_temperature, bme280_pressure, bme280_huminidy);
+					bme280_temperature, bme280_pressure, bme280_humidity);
 		}
 		else
 		{
@@ -762,11 +764,51 @@ static void http_request_task(void *arg)
 {
 	esp_http_client_handle_t client = init_HTTP();
 
-	vTaskDelay(2000 / portTICK_PERIOD_MS);
+	char* request = {0};
+	char data [SIZE_FOR_DATA];
+
+	vTaskDelay(60000 / portTICK_PERIOD_MS);
 
 	for(;;)
 	{
-		// TODO: Create and send HTTP request to server
+		for(uint8_t i = 0; i < 5; i++)
+		{
+			switch(i)
+			{
+			case 0:
+				sprintf(data, "%ld", (long int) mhz19b_co2);
+				request = (char*) mhz19b_co2_req;
+				break;
+
+			case 1:
+				sprintf(data, "%ld", (long int) mhz19b_temperature);
+				request = (char*) mhz19b_temp_req;
+				break;
+
+			case 2:
+				sprintf(data, "%.2f", bme280_temperature);
+				request = (char*) bme280_temp_req;
+				break;
+
+			case 3:
+				sprintf(data, "%.2f", bme280_humidity);
+				request = (char*) bme280_hum_req;
+				break;
+
+			case 4:
+				sprintf(data, "%.2f", bme280_pressure);
+				request = (char*) bme280_press_req;
+				break;
+			}
+
+			if(request != NULL && data != NULL)
+			{
+				http_request(client, HTTP_METHOD_POST, (char*) URL_POST, (char*) request, (char*) data);
+			}
+
+			vTaskDelay(10000 / portTICK_PERIOD_MS);
+		}
+
 		vTaskDelay(30000 / portTICK_PERIOD_MS);
 	}
 
