@@ -13,7 +13,7 @@
  * 3.3v - 3.3v ESP
  * GND  - GND  ESP
  *
- * MH-Z19B connect (UART_NUM_2):
+ * MH-Z19B connect (UART2):
  * TX   - RX ESP  - [GPIO_NUM_16]  (RX2)
  * RX   - TX ESP  - [GPIO_NUM_17]  (TX2)
  * VIN  - VIN (5v) / 3.3v ESP [Need power from board! | Better to use 5v]
@@ -76,8 +76,10 @@
 #include "esp_netif.h"
 /* ------ Private defines ------ */
 #define MHZ19B_BAUDRATE            9600
+
 #define BUFFER_SIZE_T              1024
 #define TASK_STACK_SIZE            2048
+
 #define HTTP_TASK_STACK_SIZE       8192
 #define MAX_HTTP_RECV_BUFFER       512
 #define MAX_HTTP_OUTPUT_BUFFER     2048
@@ -99,11 +101,17 @@
 
 #define I2C_MASTER_ACK             0
 #define I2C_MASTER_NACK            1
+
 #define ESP_MAXIMUM_RETRY          5
 
 #define WIFI_SSID                  "AirPort Extreme"
 #define WIFI_PASS                  "6735s41wty801"
-#define URL_POST                   "http://httpbin.org/post"
+
+#define EXAMPLE_URL_POST           "http://httpbin.org/post"
+#define EXAMPLE_URL_PUT            "http://httpbin.org/put"
+#define EXAMPLE_URL_GET            "http://httpbin.org/get"
+
+#define URL_POST                   "http://192.168.1.192:8000/sensors"
 
 #define WIFI_CONNECTED_BIT         BIT0
 #define WIFI_FAIL_BIT              BIT1
@@ -122,9 +130,8 @@ void delay_ms(uint32_t ms);
 void Error_Check_MH_Z19B(mhz19_err_t error);
 void Message_HTTP_Client(esp_http_client_method_t method);
 
-static void http_request(esp_http_client_handle_t client,
-                  esp_http_client_method_t method,
-                  char* url, char* key, char* value);
+static void http_request(esp_http_client_method_t method,
+                         char* url, char* post_data);
 
 static void event_handler(void* arg,
 		esp_event_base_t event_base,
@@ -144,6 +151,7 @@ int8_t BME280_I2C_Read(uint8_t dev_addr,
 		uint8_t* reg_data,
 		uint8_t count);
 
+char* Data_for_req(void);
 /* ------ Private Tasks prototypes ------ */
 static void bme280_check_task(void *arg);
 static void mhz19b_check_task(void *arg);
@@ -151,11 +159,19 @@ static void http_request_task(void *arg);
 /* ------ Private variables ------ */
 struct bme280_t bme280;
 
+struct data_request_t {
+	char mzh_co2[SIZE_FOR_DATA];
+	char mzh_temperature[SIZE_FOR_DATA];
+	char bme_temperature[SIZE_FOR_DATA];
+	char bme_humidity[SIZE_FOR_DATA];
+	char bme_pressure[SIZE_FOR_DATA];
+} data_request;
+
 static uint8_t retry_try = 0;
 
 int32_t mhz19b_temperature = 0;
-int32_t mhz19b_co2 = 0;
-int32_t range = 2000;
+int32_t mhz19b_co2         = 0;
+int32_t range              = 2000;
 
 double bme280_temperature = 0;
 double bme280_humidity    = 0;
@@ -169,13 +185,12 @@ QueueHandle_t uart_queue;
 
 uart_port_t uart_num = UART_NUM_2;
 
-/* Requests templates */
-const char* bme280_temp_req   = "{\"temp_bme\":\"";
-const char* bme280_hum_req    = "{\"hum_bme\":\"";
-const char* bme280_press_req  = "{\"press_bme\":\"";
-const char* mhz19b_temp_req   = "{\"temp_mhz\":\"";
-const char* mhz19b_co2_req    = "{\"co2_mhz\":\"";
-const char* end_of_req        = "\"}";
+/* Requests templates for x-www-form-urlencoded */
+const char* bme280_t_req = "temp_bme";
+const char* bme280_h_req = "hum_bme";
+const char* bme280_p_req = "press_bme";
+const char* mhz19b_c_req = "co2_mhz";
+const char* mhz19b_t_req = "temp_mhz";
 /* ------------------- MAIN function ------------------- */
 void app_main(void)
 {
@@ -188,7 +203,7 @@ void app_main(void)
 	/* ---- Start functions before scheduler ---- */
 	start_message();
 	/* ---- Tasks ---- */
- 	xTaskCreate(&http_request_task, "http_test_task", TASK_STACK_SIZE * 2, NULL, 5, NULL);
+ 	xTaskCreate(&http_request_task, "http_test_task", TASK_STACK_SIZE * 4, NULL, 5, NULL);
 	xTaskCreate(&bme280_check_task, "bme280_check_task", TASK_STACK_SIZE, NULL, 6, NULL);
 	xTaskCreate(&mhz19b_check_task, "mhz19b_check_task", TASK_STACK_SIZE, NULL, 25, NULL);
 }
@@ -323,21 +338,6 @@ void init_WIFI_Station(void)
 	vEventGroupDelete(s_wifi_event_group);
 }
 
-esp_http_client_handle_t init_HTTP(void)
-{
-	esp_http_client_config_t http_config = {
-			.host = "httpbin.org",
-			.path = "/get",
-			.query = "esp",
-			.event_handler = _http_event_handler,
-			.user_data = local_response_buffer
-	};
-
-	esp_http_client_handle_t client = esp_http_client_init(&http_config);
-
-	return client;
-}
-
 void init_MH_Z19B(void)
 {
 	ESP_LOGI(TAG_MHZ19B, "Init MH-Z19B start.");
@@ -457,6 +457,51 @@ void Message_HTTP_Client(esp_http_client_method_t method)
 			ESP_LOGE(TAG_HTTP, "HTTP Request: OTHER [CHECK FOR AVAILABLE METHODS]");
 			break;
 	}
+}
+
+char* Data_for_req(void)
+{
+	char* request = NULL;
+
+	for(uint8_t i = 0; i < 5; i++)
+	{
+		switch(i)
+		{
+		case 0:
+			sprintf(data_request.mzh_co2, "%ld", (long int) mhz19b_co2);
+			break;
+
+		case 1:
+			sprintf(data_request.mzh_temperature, "%ld", (long int) mhz19b_temperature);
+			break;
+
+		case 2:
+			sprintf(data_request.bme_temperature, "%.2f", bme280_temperature);
+			break;
+
+		case 3:
+			sprintf(data_request.bme_humidity, "%.2f", bme280_humidity);
+			break;
+
+		case 4:
+			sprintf(data_request.bme_pressure, "%.2f", bme280_pressure);
+			break;
+		}
+	}
+
+	asprintf(&request, "%s=%s&%s=%s&%s=%s&%s=%s&%s=%s",
+			mhz19b_c_req, data_request.mzh_co2,
+			mhz19b_t_req, data_request.mzh_temperature,
+			bme280_t_req, data_request.bme_temperature,
+			bme280_h_req, data_request.bme_humidity,
+			bme280_p_req, data_request.bme_pressure);
+
+	if(request != NULL)
+	{
+		return request;
+	}
+
+	return (char*) '0';
 }
 /* ------------------- BME280 functions ------------------- */
 int8_t BME280_I2C_Write(uint8_t dev_addr, uint8_t reg_addr, uint8_t* reg_data, uint8_t cnt)
@@ -636,26 +681,27 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 	return ESP_OK;
 }
 
-static void http_request(esp_http_client_handle_t client,
-                         esp_http_client_method_t method,
-                         char* url, char* key, char* value)
+static void http_request(esp_http_client_method_t method,
+                         char* url, char* post_data)
 {
-	char* post_data = NULL; // TODO: Check after test
+	esp_http_client_config_t http_config = {
+			.url = url,
+			.method = method,
+			.event_handler = _http_event_handler,
+			.user_data = local_response_buffer
+	};
 
-	/* Set config */
+	esp_http_client_handle_t client = esp_http_client_init(&http_config);
+
+	/* Set data for config */
 	esp_http_client_set_url(client, url);
 	esp_http_client_set_method(client, method);
 
 	/* If method PUT or POST -> we need to reconfigure http header */
 	if(method == HTTP_METHOD_POST || method == HTTP_METHOD_PUT)
 	{
-		post_data = (char*) malloc (strlen(key) + strlen(value) + strlen(end_of_req) + 1);
-
-		sprintf(post_data, "%s%s%s", key, value, end_of_req);
-
 		ESP_LOGI(TAG_HTTP, "Post_data request = %s", post_data);
-
-		esp_http_client_set_header(client, "Content-Type", "application/json");
+		esp_http_client_set_header(client, "Content-Type", "application/x-www-form-urlencoded");
 		esp_http_client_set_post_field(client, post_data, strlen(post_data));
 	}
 
@@ -676,17 +722,13 @@ static void http_request(esp_http_client_handle_t client,
 				esp_err_to_name(err));
 	}
 
-	/* If method PUT or POST -> check local response buffer */
+	/* If method GET or HEAD -> check local response buffer */
 	if(method == HTTP_METHOD_GET || method == HTTP_METHOD_HEAD)
 	{
 		ESP_LOG_BUFFER_HEX(TAG_HTTP, local_response_buffer, strlen(local_response_buffer));
 	}
 
-	if(post_data)
-	{
-		free(post_data);
-		ESP_LOGI(TAG_HTTP, "Post_data request is free.");
-	}
+	esp_http_client_cleanup(client);
 }
 
 /* ------------------- TASKS ------------------- */
@@ -737,7 +779,7 @@ static void mhz19b_check_task(void *arg)
 
 	mhz19_err_t mhz19b_error;
 
-	//TODO: Add delay
+	vTaskDelay(30000 / portTICK_PERIOD_MS);
 
 	for(;;)
 	{
@@ -762,52 +804,16 @@ static void mhz19b_check_task(void *arg)
 
 static void http_request_task(void *arg)
 {
-	esp_http_client_handle_t client = init_HTTP();
+	char* request;
 
-	char* request = {0};
-	char data [SIZE_FOR_DATA];
-
+	/* TODO: [After test] Set delay for > 10 min 'cause MH-Z19B need time to get correct data */
 	vTaskDelay(60000 / portTICK_PERIOD_MS);
 
 	for(;;)
 	{
-		for(uint8_t i = 0; i < 5; i++)
-		{
-			switch(i)
-			{
-			case 0:
-				sprintf(data, "%ld", (long int) mhz19b_co2);
-				request = (char*) mhz19b_co2_req;
-				break;
+		request = Data_for_req();
 
-			case 1:
-				sprintf(data, "%ld", (long int) mhz19b_temperature);
-				request = (char*) mhz19b_temp_req;
-				break;
-
-			case 2:
-				sprintf(data, "%.2f", bme280_temperature);
-				request = (char*) bme280_temp_req;
-				break;
-
-			case 3:
-				sprintf(data, "%.2f", bme280_humidity);
-				request = (char*) bme280_hum_req;
-				break;
-
-			case 4:
-				sprintf(data, "%.2f", bme280_pressure);
-				request = (char*) bme280_press_req;
-				break;
-			}
-
-			if(request != NULL && data != NULL)
-			{
-				http_request(client, HTTP_METHOD_POST, (char*) URL_POST, (char*) request, (char*) data);
-			}
-
-			vTaskDelay(10000 / portTICK_PERIOD_MS);
-		}
+		http_request(HTTP_METHOD_POST, (char*) URL_POST, (char*) request);
 
 		vTaskDelay(30000 / portTICK_PERIOD_MS);
 	}
