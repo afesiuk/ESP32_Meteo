@@ -57,6 +57,8 @@
 #include "driver/i2c.h"
 #include "driver/gpio.h"
 
+#include "config.h"
+
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -103,9 +105,6 @@
 #define I2C_MASTER_NACK            1
 
 #define ESP_MAXIMUM_RETRY          5
-
-#define WIFI_SSID                  "AirPort Extreme"
-#define WIFI_PASS                  "6735s41wty801"
 
 #define EXAMPLE_URL_POST           "http://httpbin.org/post"
 #define EXAMPLE_URL_PUT            "http://httpbin.org/put"
