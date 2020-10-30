@@ -3,6 +3,6 @@
 # project subdirectory.
 #
 
-PROJECT_NAME := sample_project
+PROJECT_NAME := esp32_meteo
 
 include $(IDF_PATH)/make/project.mk

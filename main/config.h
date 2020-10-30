@@ -18,7 +18,7 @@
 #define PATH_SERVER                "/sensors"
 #define PORT_SERVER                8000  /* Default for transport_t: (80 or 443) */
 /* --------------- SNTP server / time ---------------- */
-#define URL_SNTP                   "pool.ntp.org"
+#define URL_NTP_SERVER             "pool.ntp.org"
 #define FORMAT_TIMEZONE_KIEV       "EET-2EEST,M3.5.0/3,M10.5.0/4"
 /* ----------------- MH-Z19B settings ---------------- */
 #define MHZ19B_BAUDRATE            9600

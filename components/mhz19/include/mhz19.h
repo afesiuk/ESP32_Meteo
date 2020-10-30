@@ -50,3 +50,4 @@ uint8_t mhz19_calc_crc(uint8_t data[]);
 int mhz19_bytes2int(uint8_t h, uint8_t l);
 
 #endif
+

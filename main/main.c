@@ -13,7 +13,7 @@
  * 3.3v - 3.3v ESP
  * GND  - GND  ESP
  *
- * MH-Z19B connect (UART2):
+ * MH-Z19B connect (UART):
  * TX   - RX ESP  - [GPIO_NUM_16]  (RX2)
  * RX   - TX ESP  - [GPIO_NUM_17]  (TX2)
  * VIN  - VIN (5v) / 3.3v ESP [Need power from board! | Better to use 5v]
@@ -378,7 +378,7 @@ void init_SNTP(void)
 {
 	ESP_LOGI(TAG_TIME, "Init SNTP");
 	sntp_setoperatingmode(SNTP_OPMODE_POLL);
-	sntp_setservername(0, URL_SNTP);
+	sntp_setservername(0, URL_NTP_SERVER);
 	sntp_set_time_sync_notification_cb(time_sync_notification_cb);
 	sntp_init();
 }
@@ -724,10 +724,6 @@ static void http_request(esp_http_client_method_t method, char* post_data)
 
 	esp_http_client_handle_t client = esp_http_client_init(&http_config);
 
-	/* Set data for config */
-//	esp_http_client_set_url(client, url);
-	esp_http_client_set_method(client, method);
-
 	/* If method PUT or POST -> we need to reconfigure http header */
 	if(method == HTTP_METHOD_POST || method == HTTP_METHOD_PUT)
 	{
@@ -877,7 +873,7 @@ static void http_request_task(void *arg)
 {
 	char* request;
 
-	/* TODO: [After test] Set delay for > 10 min 'cause MH-Z19B need time to get correct data */
+	/* TODO: [After test] Set delay for > 10 min 'cause MH-Z19B need more time to get correct data */
 	vTaskDelay(60000 / portTICK_PERIOD_MS);
 
 	for(;;)

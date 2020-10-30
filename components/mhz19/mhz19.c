@@ -89,7 +89,7 @@ void mhz19_send_command(uint8_t command, uint8_t b3, uint8_t b4, uint8_t b5, uin
     cmd[8] = mhz19_calc_crc(cmd);
 
     mhz19_print_buffer(1, cmd);
-    mhz19_write(cmd, 9);  
+    mhz19_write(cmd, 9);
 }
 
 size_t mhz19_read(uint8_t data[], uint8_t len)
@@ -103,16 +103,16 @@ size_t mhz19_read(uint8_t data[], uint8_t len)
 	{
 		ESP_ERROR_CHECK(uart_get_buffered_data_len(MHZ19_data_t._uart_num, (size_t*)&length));
 
-		if (millis() - start_millis >= MHZ19_REQUEST_TIMEOUT_PERIOD) 
+		if (millis() - start_millis >= MHZ19_REQUEST_TIMEOUT_PERIOD)
 		{
-			ESP_LOGW(TAG, "Timed out waiting for response");    
+			ESP_LOGW(TAG, "Timed out waiting for response");
 			return MHZ19_ERR_TIMEOUT;
 		}
 
 		taskYIELD();
 	}
 	while(length <= 0);
-    
+
 	length = uart_read_bytes(MHZ19_data_t._uart_num, data, len, 100);
     mhz19_print_buffer(0, data);
 
@@ -143,7 +143,7 @@ mhz19_err_t mhz19_receive_response(uint8_t cmd[9])
     {
     	MHZ19_data_t._mhz19_result = MHZ19_ERR_OK;
     }
-    
+
     return MHZ19_data_t._mhz19_result;
 }
 
