@@ -176,7 +176,6 @@ int mhz19_get_co2()
 {
     if (MHZ19_data_t._mhz19_result == MHZ19_ERR_OK)
     {
-        // TODO: Cast the data to uint16_t instead of using an ad hoc function that doest the same
         return mhz19_bytes2int(MHZ19_data_t._mhz19_response[2],
         		MHZ19_data_t._mhz19_response[3]);
     }

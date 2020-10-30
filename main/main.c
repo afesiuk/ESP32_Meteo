@@ -43,7 +43,6 @@
  * 408 - Request Timeout
  * 429 - Too Many Requests
  */
-
 #include <stdio.h>
 #include <string.h>
 #include "sdkconfig.h"
@@ -82,7 +81,6 @@
 #include "esp_attr.h"
 #include "esp_sntp.h"
 /* ------ Private defines ------ */
-#define MHZ19B_BAUDRATE            9600
 #define SIZE_FOR_DATA              26
 
 #define BUFFER_SIZE_T              1024
@@ -103,7 +101,6 @@
 
 #define I2C_MASTER_ACK             0
 #define I2C_MASTER_NACK            1
-#define ESP_MAXIMUM_RETRY          5
 
 #define EXAMPLE_URL_POST           "http://httpbin.org/post"
 #define EXAMPLE_URL_PUT            "http://httpbin.org/put"
@@ -118,17 +115,19 @@ void init_GPIO(void);
 void init_NVS (void);
 void init_WIFI_Station(void);
 void init_MH_Z19B(void);
-int32_t init_BME280(void);
 void init_SNTP(void);
 void init_Time(void);
+int32_t init_BME280(void);
 
 void start_message();
 void delay_ms(uint32_t ms);
 void Error_Check_MH_Z19B(mhz19_err_t error);
 void Message_HTTP_Client(esp_http_client_method_t method);
+void time_sync_notification_cb(struct timeval *tv);
 
-static void http_request(esp_http_client_method_t method,
-                         char* url, char* post_data);
+static void obtain_time(void);
+
+static void http_request(esp_http_client_method_t method, char* post_data);
 
 static void event_handler(void* arg,
 		esp_event_base_t event_base,
@@ -150,8 +149,6 @@ int8_t BME280_I2C_Read(uint8_t dev_addr,
 
 char* Data_for_req(void);
 
-static void obtain_time(void);
-void time_sync_notification_cb(struct timeval *tv);
 /* ------ Private Tasks prototypes ------ */
 static void bme280_check_task(void *arg);
 static void mhz19b_check_task(void *arg);
@@ -172,7 +169,6 @@ static uint8_t retry_try = 0;
 
 int32_t mhz19b_temperature = 0;
 int32_t mhz19b_co2         = 0;
-int32_t range              = 2000;
 
 double bme280_temperature = 0;
 double bme280_humidity    = 0;
@@ -185,16 +181,15 @@ static EventGroupHandle_t s_wifi_event_group; // FreeRTOS event group to signal 
 static time_t now;
 
 QueueHandle_t uart_queue;
+uart_port_t uart_num = UART_PORT;
 
-uart_port_t uart_num = UART_NUM_2;
 /* Requests templates for x-www-form-urlencoded */
-const char* bme280_t_req = "temp_bme";
-const char* bme280_h_req = "hum_bme";
-const char* bme280_p_req = "press_bme";
-const char* mhz19b_c_req = "co2_mhz";
-const char* mhz19b_t_req = "temp_mhz";
-
-RTC_DATA_ATTR static int rtc_data = 0;
+const char* bme280_t_req  = "temp_bme";
+const char* bme280_h_req  = "hum_bme";
+const char* bme280_p_req  = "press_bme";
+const char* mhz19b_c_req  = "co2_mhz";
+const char* mhz19b_t_req  = "temp_mhz";
+const char* date_time_req = "date_time";
 /* ------------------- MAIN function ------------------- */
 void app_main(void)
 {
@@ -248,8 +243,8 @@ void init_I2C(void)
 			.master.clk_speed = 100000
 	};
 
-	i2c_param_config(I2C_NUM_0, &i2c_config);
-	i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0);
+	i2c_param_config(I2C_PORT, &i2c_config);
+	i2c_driver_install(I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
 }
 
 void init_GPIO(void)
@@ -350,7 +345,7 @@ void init_MH_Z19B(void)
 
 	mhz19_init(uart_num);
 	mhz19_set_auto_calibration(false);
-	mhz19_set_range(range);
+	mhz19_set_range(MEASURE_RANGE);
 
 	ESP_LOGI(TAG_MHZ19B, "Init MH-Z19B done.");
 }
@@ -395,14 +390,14 @@ void init_Time(void)
 	obtain_time();
 	time(&now);
 
-	/* Set time zone to Europe/Kiev */
-	setenv("TZ", "EET-2EEST,M3.5.0/3,M10.5.0/4", 1);
+	/* Set timezone to Europe/Kiev */
+	setenv("TZ", FORMAT_TIMEZONE_KIEV, 1);
 	tzset();
 
 	localtime_r(&now, &timeinfo);
 	strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
 
-	ESP_LOGI(TAG_TIME, "Time was set.");
+	ESP_LOGI(TAG_TIME, "Time has been set.");
 
 	ESP_LOGI(TAG_TIME, "Time in Kiev: %s", strftime_buf);
 }
@@ -523,12 +518,13 @@ char* Data_for_req(void)
 		}
 	}
 
-	asprintf(&request, "%s=%s&%s=%s&%s=%s&%s=%s&%s=%s",
+	asprintf(&request, "%s=%s&%s=%s&%s=%s&%s=%s&%s=%s&%s=%s",
 			mhz19b_c_req, data_request.mzh_co2,
 			mhz19b_t_req, data_request.mzh_temperature,
 			bme280_t_req, data_request.bme_temperature,
 			bme280_h_req, data_request.bme_humidity,
-			bme280_p_req, data_request.bme_pressure);
+			bme280_p_req, data_request.bme_pressure,
+			date_time_req, strftime_buf);
 
 	if(request != NULL)
 	{
@@ -615,13 +611,13 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 		{
 			esp_wifi_connect();
 			retry_try++;
-			ESP_LOGI(TAG_WIFI, "Retry to connect to the AP");
+			ESP_LOGI(TAG_WIFI, "Retry to connect to the AP.");
 		}
 		else
 		{
 			xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
 		}
-		ESP_LOGI(TAG_WIFI, "Connect to the AP fail");
+		ESP_LOGI(TAG_WIFI, "Connect to the AP fail.");
 	}
 	else if(event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
 	{
@@ -715,11 +711,12 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 	return ESP_OK;
 }
 
-static void http_request(esp_http_client_method_t method,
-                         char* url, char* post_data)
+static void http_request(esp_http_client_method_t method, char* post_data)
 {
 	esp_http_client_config_t http_config = {
-			.url = url,
+			.host = IP_ADDR_SERVER,
+			.port = PORT_SERVER,
+			.path = PATH_SERVER,
 			.method = method,
 			.event_handler = _http_event_handler,
 			.user_data = local_response_buffer
@@ -728,13 +725,13 @@ static void http_request(esp_http_client_method_t method,
 	esp_http_client_handle_t client = esp_http_client_init(&http_config);
 
 	/* Set data for config */
-	esp_http_client_set_url(client, url);
+//	esp_http_client_set_url(client, url);
 	esp_http_client_set_method(client, method);
 
 	/* If method PUT or POST -> we need to reconfigure http header */
 	if(method == HTTP_METHOD_POST || method == HTTP_METHOD_PUT)
 	{
-		ESP_LOGI(TAG_HTTP, "Post_data request: %s", post_data);
+		ESP_LOGI(TAG_HTTP, "Body of request: %s", post_data);
 		esp_http_client_set_header(client, "Content-Type", "application/x-www-form-urlencoded");
 		esp_http_client_set_post_field(client, post_data, strlen(post_data));
 	}
@@ -793,7 +790,7 @@ static void update_time(void)
 	localtime_r(&now, &timeinfo);
 	strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
 
-	ESP_LOGI(TAG_TIME, "Time was updated.");
+	ESP_LOGI(TAG_TIME, "Time has been updated.");
 }
 /* ------------------- TASKS ------------------- */
 static void bme280_check_task(void *arg)
@@ -828,13 +825,15 @@ static void bme280_check_task(void *arg)
 		}
 		else
 		{
+			/* data of sensor -> 0 'cause we don't get actual data */
+			bme280_temperature = 0;
+			bme280_pressure = 0;
+			bme280_humidity = 0;
+
 			ESP_LOGE(TAG_BME280, "Measure error | code: %d", com_rslt);
 		}
 
 		vTaskDelay(10000 / portTICK_PERIOD_MS);
-
-		update_time();
-		ESP_LOGI(TAG_TIME, "Local time: %s", strftime_buf);
 	}
 
 	vTaskDelete(NULL);
@@ -857,6 +856,11 @@ static void mhz19b_check_task(void *arg)
 		if(mhz19b_error != MHZ19_ERR_OK)
 		{
 			Error_Check_MH_Z19B(mhz19b_error);
+
+			/* data of sensor -> 0 'cause we don't get actual data */
+			mhz19b_co2 = 0;
+			mhz19b_temperature = 0;
+
 			continue;
 		}
 
@@ -878,11 +882,15 @@ static void http_request_task(void *arg)
 
 	for(;;)
 	{
+		update_time();
+
+		/* Create request to server */
 		request = Data_for_req();
 
-		http_request(HTTP_METHOD_POST, (char*) URL_POST, (char*) request);
+		/* Send body of request */
+		http_request(HTTP_METHOD_POST, (char*) request);
 
-		vTaskDelay(30000 / portTICK_PERIOD_MS);
+		vTaskDelay(60000 / portTICK_PERIOD_MS);
 	}
 
 	vTaskDelete(NULL);
