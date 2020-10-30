@@ -76,45 +76,41 @@
 #include "esp_http_client.h"
 #include "esp_tls.h"
 #include "esp_netif.h"
+
+#include <time.h>
+#include <sys/time.h>
+#include "esp_attr.h"
+#include "esp_sntp.h"
 /* ------ Private defines ------ */
 #define MHZ19B_BAUDRATE            9600
+#define SIZE_FOR_DATA              26
 
 #define BUFFER_SIZE_T              1024
 #define TASK_STACK_SIZE            2048
-
 #define HTTP_TASK_STACK_SIZE       8192
 #define MAX_HTTP_RECV_BUFFER       512
 #define MAX_HTTP_OUTPUT_BUFFER     2048
-#define SIZE_FOR_DATA              26
+#define SRTF_TIME_BUFFER           64
 
 #define TAG_INFO                   "INFO"
 #define TAG_BME280                 "BME280"
 #define TAG_MHZ19B                 "MH-Z19B"
 #define TAG_WIFI                   "Wifi_Station"
 #define TAG_HTTP                   "HTTP_Client"
+#define TAG_TIME                   "Time_SNTP"
 
 #define LED_BOARD                  GPIO_NUM_2
 
-#define SDA_PIN                    GPIO_NUM_21
-#define SCL_PIN                    GPIO_NUM_22
-
-#define UART_TX_PIN                GPIO_NUM_17
-#define UART_RX_PIN                GPIO_NUM_16
-
 #define I2C_MASTER_ACK             0
 #define I2C_MASTER_NACK            1
-
 #define ESP_MAXIMUM_RETRY          5
 
 #define EXAMPLE_URL_POST           "http://httpbin.org/post"
 #define EXAMPLE_URL_PUT            "http://httpbin.org/put"
 #define EXAMPLE_URL_GET            "http://httpbin.org/get"
 
-#define URL_POST                   "http://192.168.1.192:8000/sensors"
-
 #define WIFI_CONNECTED_BIT         BIT0
 #define WIFI_FAIL_BIT              BIT1
-
 /* ------ Private functions prototypes ------ */
 void init_UART(void);
 void init_I2C (void);
@@ -123,6 +119,8 @@ void init_NVS (void);
 void init_WIFI_Station(void);
 void init_MH_Z19B(void);
 int32_t init_BME280(void);
+void init_SNTP(void);
+void init_Time(void);
 
 void start_message();
 void delay_ms(uint32_t ms);
@@ -151,12 +149,16 @@ int8_t BME280_I2C_Read(uint8_t dev_addr,
 		uint8_t count);
 
 char* Data_for_req(void);
+
+static void obtain_time(void);
+void time_sync_notification_cb(struct timeval *tv);
 /* ------ Private Tasks prototypes ------ */
 static void bme280_check_task(void *arg);
 static void mhz19b_check_task(void *arg);
 static void http_request_task(void *arg);
 /* ------ Private variables ------ */
 struct bme280_t bme280;
+struct tm timeinfo;
 
 struct data_request_t {
 	char mzh_co2[SIZE_FOR_DATA];
@@ -176,20 +178,23 @@ double bme280_temperature = 0;
 double bme280_humidity    = 0;
 double bme280_pressure    = 0;
 
+char strftime_buf[SRTF_TIME_BUFFER] = {0};
 char local_response_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};
 
 static EventGroupHandle_t s_wifi_event_group; // FreeRTOS event group to signal when we are connected
+static time_t now;
 
 QueueHandle_t uart_queue;
 
 uart_port_t uart_num = UART_NUM_2;
-
 /* Requests templates for x-www-form-urlencoded */
 const char* bme280_t_req = "temp_bme";
 const char* bme280_h_req = "hum_bme";
 const char* bme280_p_req = "press_bme";
 const char* mhz19b_c_req = "co2_mhz";
 const char* mhz19b_t_req = "temp_mhz";
+
+RTC_DATA_ATTR static int rtc_data = 0;
 /* ------------------- MAIN function ------------------- */
 void app_main(void)
 {
@@ -199,6 +204,8 @@ void app_main(void)
     init_UART();
     init_NVS();
 	init_WIFI_Station();
+	init_SNTP();
+	init_Time();
 	/* ---- Start functions before scheduler ---- */
 	start_message();
 	/* ---- Tasks ---- */
@@ -370,6 +377,34 @@ int32_t init_BME280(void)
 	ESP_LOGI(TAG_BME280, "Init BME280 done.");
 
 	return (int32_t) com_rslt;
+}
+
+void init_SNTP(void)
+{
+	ESP_LOGI(TAG_TIME, "Init SNTP");
+	sntp_setoperatingmode(SNTP_OPMODE_POLL);
+	sntp_setservername(0, URL_SNTP);
+	sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+	sntp_init();
+}
+
+void init_Time(void)
+{
+	ESP_LOGI(TAG_TIME, "Time is not set. Setting time over NTP server...");
+
+	obtain_time();
+	time(&now);
+
+	/* Set time zone to Europe/Kiev */
+	setenv("TZ", "EET-2EEST,M3.5.0/3,M10.5.0/4", 1);
+	tzset();
+
+	localtime_r(&now, &timeinfo);
+	strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+
+	ESP_LOGI(TAG_TIME, "Time was set.");
+
+	ESP_LOGI(TAG_TIME, "Time in Kiev: %s", strftime_buf);
 }
 
 /* ------------------- Other functions ------------------- */
@@ -699,7 +734,7 @@ static void http_request(esp_http_client_method_t method,
 	/* If method PUT or POST -> we need to reconfigure http header */
 	if(method == HTTP_METHOD_POST || method == HTTP_METHOD_PUT)
 	{
-		ESP_LOGI(TAG_HTTP, "Post_data request = %s", post_data);
+		ESP_LOGI(TAG_HTTP, "Post_data request: %s", post_data);
 		esp_http_client_set_header(client, "Content-Type", "application/x-www-form-urlencoded");
 		esp_http_client_set_post_field(client, post_data, strlen(post_data));
 	}
@@ -729,7 +764,37 @@ static void http_request(esp_http_client_method_t method,
 
 	esp_http_client_cleanup(client);
 }
+/* ------------------- SNTP functions / handlers ------------------- */
+void time_sync_notification_cb(struct timeval *tv)
+{
+	ESP_LOGI(TAG_TIME, "Notification of a time synchronization event");
+}
 
+static void obtain_time(void)
+{
+	uint8_t retry = 0;
+	uint8_t retry_count = 10;
+	time_t now = 0;
+	struct tm timeinfo = {0};
+
+	while(sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count)
+	{
+		ESP_LOGI(TAG_TIME, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+		vTaskDelay(2000 / portTICK_PERIOD_MS);
+	}
+
+	time(&now);
+	localtime_r(&now, &timeinfo);
+}
+
+static void update_time(void)
+{
+	time(&now);
+	localtime_r(&now, &timeinfo);
+	strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+
+	ESP_LOGI(TAG_TIME, "Time was updated.");
+}
 /* ------------------- TASKS ------------------- */
 static void bme280_check_task(void *arg)
 {
@@ -767,6 +832,9 @@ static void bme280_check_task(void *arg)
 		}
 
 		vTaskDelay(10000 / portTICK_PERIOD_MS);
+
+		update_time();
+		ESP_LOGI(TAG_TIME, "Local time: %s", strftime_buf);
 	}
 
 	vTaskDelete(NULL);
