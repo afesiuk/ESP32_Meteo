@@ -102,9 +102,9 @@
 #define I2C_MASTER_ACK             0
 #define I2C_MASTER_NACK            1
 
-#define EXAMPLE_URL_POST           "http://httpbin.org/post"
-#define EXAMPLE_URL_PUT            "http://httpbin.org/put"
-#define EXAMPLE_URL_GET            "http://httpbin.org/get"
+#define TEST_URL_POST              "http://httpbin.org/post"
+#define TEST_URL_PUT               "http://httpbin.org/put"
+#define TEST_URL_GET               "http://httpbin.org/get"
 
 #define WIFI_CONNECTED_BIT         BIT0
 #define WIFI_FAIL_BIT              BIT1
@@ -153,6 +153,7 @@ char* Data_for_req(void);
 static void bme280_check_task(void *arg);
 static void mhz19b_check_task(void *arg);
 static void http_request_task(void *arg);
+static void co2_led_task(void *arg);
 /* ------ Private variables ------ */
 struct bme280_t bme280;
 struct tm timeinfo;
@@ -194,19 +195,20 @@ const char* date_time_req = "date_time";
 void app_main(void)
 {
 	/* ---- Init periphal ---- */
-    init_GPIO();
-    init_I2C();
-    init_UART();
-    init_NVS();
+	init_GPIO();
+	init_I2C();
+	init_UART();
+	init_NVS();
 	init_WIFI_Station();
 	init_SNTP();
 	init_Time();
 	/* ---- Start functions before scheduler ---- */
 	start_message();
 	/* ---- Tasks ---- */
- 	xTaskCreate(&http_request_task, "http_test_task", TASK_STACK_SIZE * 4, NULL, 5, NULL);
+	xTaskCreate(&http_request_task, "http_test_task", TASK_STACK_SIZE * 4, NULL, 5, NULL);
 	xTaskCreate(&bme280_check_task, "bme280_check_task", TASK_STACK_SIZE, NULL, 6, NULL);
-	xTaskCreate(&mhz19b_check_task, "mhz19b_check_task", TASK_STACK_SIZE, NULL, 25, NULL);
+	xTaskCreate(&mhz19b_check_task, "mhz19b_check_task", TASK_STACK_SIZE, NULL, 7, NULL);
+	xTaskCreate(&co2_led_task, "co2_led_task", TASK_STACK_SIZE, NULL, 8, NULL);
 }
 
 /* ------------------- Init Periphal ------------------- */
@@ -251,7 +253,15 @@ void init_GPIO(void)
 {
 	gpio_pad_select_gpio(LED_BOARD);
 	gpio_set_direction(LED_BOARD, GPIO_MODE_OUTPUT);
-	//gpio_set_level(LED_BOARD, 0);
+
+	gpio_pad_select_gpio(RED_LED);
+	gpio_set_direction(RED_LED, GPIO_MODE_OUTPUT);
+
+	gpio_pad_select_gpio(GREEN_LED);
+	gpio_set_direction(GREEN_LED, GPIO_MODE_OUTPUT);
+
+	gpio_pad_select_gpio(BLUE_LED);
+	gpio_set_direction(BLUE_LED, GPIO_MODE_OUTPUT);
 }
 
 void init_NVS(void)
@@ -829,7 +839,7 @@ static void bme280_check_task(void *arg)
 			ESP_LOGE(TAG_BME280, "Measure error | code: %d", com_rslt);
 		}
 
-		vTaskDelay(10000 / portTICK_PERIOD_MS);
+		vTaskDelay(BME280_MEASURE_DELAY / portTICK_PERIOD_MS);
 	}
 
 	vTaskDelete(NULL);
@@ -841,11 +851,11 @@ static void mhz19b_check_task(void *arg)
 
 	mhz19_err_t mhz19b_error;
 
-	vTaskDelay(30000 / portTICK_PERIOD_MS);
+	vTaskDelay(START_MEASURE_DELAY / portTICK_PERIOD_MS);
 
 	for(;;)
 	{
-		vTaskDelay(10000 / portTICK_PERIOD_MS);
+		vTaskDelay(MHZ19B_MEASURE_DELAY / portTICK_PERIOD_MS);
 
 		mhz19b_error = mhz19_retrieve_data();
 
@@ -869,12 +879,54 @@ static void mhz19b_check_task(void *arg)
 	vTaskDelete(NULL);
 }
 
+static void co2_led_task(void *arg)
+{
+	/* Wait until MH-Z19B will get actual data */
+	vTaskDelay(START_MEASURE_DELAY / portTICK_PERIOD_MS);
+
+	for(;;)
+	{
+		/* If the MH-Z19B doesn't work correctly -> turn off rgb-led */
+		if(mhz19b_co2 == 0 || mhz19b_co2 == 410)
+		{
+			gpio_set_level(RED_LED, 0);
+			gpio_set_level(GREEN_LED, 0);
+			gpio_set_level(BLUE_LED, 0);
+		}
+		else if(mhz19b_co2 <= 800)
+		{
+			/* Set green color */
+			gpio_set_level(RED_LED, 0);
+			gpio_set_level(GREEN_LED, 1);
+			gpio_set_level(BLUE_LED, 0);
+		}
+		else if(mhz19b_co2 > 800 && mhz19b_co2 <= 1400)
+		{
+			/* Set yellow color */
+			gpio_set_level(RED_LED, 1);
+			gpio_set_level(GREEN_LED, 1);
+			gpio_set_level(BLUE_LED, 0);
+		}
+		else
+		{
+			/* Set red color */
+			gpio_set_level(RED_LED, 1);
+			gpio_set_level(GREEN_LED, 0);
+			gpio_set_level(BLUE_LED, 0);
+		}
+
+		vTaskDelay(5000);
+	}
+
+	vTaskDelete(NULL);
+}
+
 static void http_request_task(void *arg)
 {
 	char* request;
 
 	/* TODO: [After test] Set delay for > 10 min 'cause MH-Z19B need more time to get correct data */
-	vTaskDelay(60000 / portTICK_PERIOD_MS);
+	vTaskDelay(START_HTTP_DELAY / portTICK_PERIOD_MS);
 
 	for(;;)
 	{
@@ -886,7 +938,7 @@ static void http_request_task(void *arg)
 		/* Send body of request */
 		http_request(HTTP_METHOD_POST, (char*) request);
 
-		vTaskDelay(60000 / portTICK_PERIOD_MS);
+		vTaskDelay(REQUEST_HTTP_DELAY / portTICK_PERIOD_MS);
 	}
 
 	vTaskDelete(NULL);

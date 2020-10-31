@@ -1,10 +1,17 @@
 #ifndef MAIN_CONFIG_H_
 #define MAIN_CONFIG_H_
 
+/* ----------------------- GPIO ---------------------- */
+#define RED_LED                    GPIO_NUM_25
+#define GREEN_LED                  GPIO_NUM_26
+#define BLUE_LED                   GPIO_NUM_27
 /* ---------------------- Wi-Fi ---------------------- */
 #define WIFI_SSID                  "AirPort Extreme"
 #define WIFI_PASS                  "6735s41wty801"
 #define ESP_MAXIMUM_RETRY          5
+/* ---------------------- HTTP ----------------------- */
+#define START_HTTP_DELAY           60000
+#define REQUEST_HTTP_DELAY         60000
 /* --------------------- I2C Pins -------------------- */
 #define I2C_PORT                   I2C_NUM_0
 #define SDA_PIN                    GPIO_NUM_21
@@ -23,5 +30,9 @@
 /* ----------------- MH-Z19B settings ---------------- */
 #define MHZ19B_BAUDRATE            9600
 #define MEASURE_RANGE              2000
+#define START_MEASURE_DELAY        30000
+#define MHZ19B_MEASURE_DELAY       10000
+/* ----------------- BME280 settings ----------------- */
+#define BME280_MEASURE_DELAY       10000
 
 #endif /* MAIN_CONFIG_H_ */
