@@ -91,8 +91,10 @@
 #define MAX_HTTP_RECV_BUFFER       512
 #define MAX_HTTP_OUTPUT_BUFFER     2048
 #define SRTF_TIME_BUFFER           64
+#define WIFI_FIELD_SIZE            30
 
 #define TAG_INFO                   "INFO"
+#define TAG_NVS                    "NVS Operation"
 #define TAG_BME280                 "BME280"
 #define TAG_MHZ19B                 "MH-Z19B"
 #define TAG_WIFI                   "Wifi_Station"
@@ -115,7 +117,7 @@
 void init_UART(void);
 void init_I2C (void);
 void init_GPIO(void);
-void init_NVS (void);
+esp_err_t init_NVS (void);
 void init_MH_Z19B(void);
 void init_SNTP(void);
 void init_Time(void);
@@ -127,6 +129,7 @@ void delay_ms(uint32_t ms);
 void Error_Check_MH_Z19B(mhz19_err_t error);
 void Message_HTTP_Client(esp_http_client_method_t method);
 void time_sync_notification_cb(struct timeval *tv);
+void read_NVS(void);
 
 static void wait_Connect(EventBits_t uxBits);
 static void obtain_time(void);
@@ -153,6 +156,8 @@ int8_t BME280_I2C_Read(uint8_t dev_addr,
 
 char* Data_for_req(void);
 
+void write_wifi_Credentials(uint8_t* ssid, uint8_t* password);
+void read_wifi_Credentials(void);
 /* ------ Private Tasks prototypes ------ */
 static void smartconfig_task(void *arg);
 static void bme280_check_task(void *arg);
@@ -170,6 +175,11 @@ struct data_request_t {
 	char bme_humidity[SIZE_FOR_DATA];
 	char bme_pressure[SIZE_FOR_DATA];
 } data_request;
+
+struct wifi_credentials_t {
+	char ssid[WIFI_FIELD_SIZE];
+	char password[WIFI_FIELD_SIZE];
+}wifi_data;
 
 int32_t mhz19b_temperature = 0;
 int32_t mhz19b_co2         = 0;
@@ -196,6 +206,8 @@ const char* bme280_p_req  = "press_bme";
 const char* mhz19b_c_req  = "co2_mhz";
 const char* mhz19b_t_req  = "temp_mhz";
 const char* date_time_req = "date_time";
+
+int32_t restart_counter = 0;
 /* ------------------- MAIN function ------------------- */
 void app_main(void)
 {
@@ -208,6 +220,8 @@ void app_main(void)
 	wait_Connect(uxBits); // Wait until device is connected to AP
 	init_SNTP();
 	init_Time();
+	//read_NVS();
+	read_wifi_Credentials();
 	/* --- Start functions --- */
 	start_message();
 	/* -------- Tasks -------- */
@@ -270,7 +284,7 @@ void init_GPIO(void)
 	gpio_set_direction(BLUE_LED, GPIO_MODE_OUTPUT);
 }
 
-void init_NVS(void)
+esp_err_t init_NVS(void)
 {
 	esp_err_t ret = nvs_flash_init();
 
@@ -281,6 +295,8 @@ void init_NVS(void)
 	}
 
 	ESP_ERROR_CHECK(ret);
+
+	return (esp_err_t) ret;
 }
 
 void init_Wifi_SmartConfig(void)
@@ -367,7 +383,7 @@ void init_Time(void)
 	ESP_LOGI(TAG_TIME, "Time in Kiev: %s", strftime_buf);
 }
 
-/* ------------------- Other functions ------------------- */
+/* ------------------- Different functions ------------------- */
 void delay_ms(uint32_t ms)
 {
 	vTaskDelay(ms / portTICK_PERIOD_MS);
@@ -498,6 +514,204 @@ char* Data_for_req(void)
 
 	return (char*) '0';
 }
+
+static void wait_Connect(EventBits_t uxBits)
+{
+	gpio_set_level(LED_BOARD, 1);
+	ESP_LOGW(TAG_SMART_CFG, "Waiting for connection to AP.");
+
+	while(!uxAccess) vTaskDelay(10);
+
+	gpio_set_level(LED_BOARD, 0);
+}
+
+void write_wifi_Credentials(uint8_t* ssid, uint8_t* password)
+{
+	/* Open NVS handle OP */
+	ESP_LOGI(TAG_NVS, "Opening NVS handle...");
+
+	nvs_handle_t nvs_handle;
+
+	esp_err_t err = init_NVS();
+	err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
+
+	if(err != ESP_OK)
+	{
+		ESP_LOGI(TAG_NVS, "Error [%s] opening NVS handle.\n", esp_err_to_name(err));
+		return;
+	}
+
+	/* Write OP */
+	ESP_LOGI(TAG_NVS, "Updating SSID and password in NVS...");
+
+	ESP_LOGE(TAG_NVS, "SSID: %s", (char*) ssid);
+	ESP_LOGE(TAG_NVS, "PASSWORD: %s", (char*) password);
+
+	err = nvs_set_str(nvs_handle, "wifi_ssid", (char*) ssid);
+	err = nvs_set_str(nvs_handle, "wifi_password", (char*) password);
+
+	if(err == ESP_OK)
+	{
+		ESP_LOGI(TAG_NVS, "Done.");
+	}
+	else
+	{
+		ESP_LOGI(TAG_NVS, "Failed.");
+	}
+
+	/* Commit value in NVS OP */
+	ESP_LOGI(TAG_NVS, "Committing updates in NVS...");
+	err = nvs_commit(nvs_handle);
+
+	if(err == ESP_OK)
+	{
+		ESP_LOGI(TAG_NVS, "Done.");
+	}
+	else
+	{
+		ESP_LOGI(TAG_NVS, "Failed.");
+	}
+
+	/* Close NVS */
+	nvs_close(nvs_handle);
+}
+
+void read_wifi_Credentials(void)
+{
+	/* Open NVS handle OP */
+	ESP_LOGI(TAG_NVS, "Opening NVS handle...");
+
+	nvs_handle_t nvs_handle;
+
+	esp_err_t err = init_NVS();
+	err = nvs_open("storage", NVS_READONLY, &nvs_handle);
+
+	if(err != ESP_OK)
+	{
+		ESP_LOGI(TAG_NVS, "Error [%s] opening NVS handle.\n", esp_err_to_name(err));
+	}
+	else
+	{
+		/* Read SSID OP */
+		ESP_LOGI(TAG_NVS, "Done.");
+
+		ESP_LOGI(TAG_NVS, "Reading SSID from NVS...");
+
+		size_t ssid_len = sizeof(wifi_data.ssid);
+		err = nvs_get_str(nvs_handle, "wifi_ssid", wifi_data.ssid, &ssid_len);
+
+		switch(err)
+		{
+		case ESP_OK:
+			ESP_LOGI(TAG_NVS, "Done.");
+			break;
+
+		case ESP_ERR_NVS_NOT_FOUND:
+			ESP_LOGI(TAG_NVS, "The value is not init yet.");
+			break;
+
+		default:
+			ESP_LOGI(TAG_NVS, "Error [%s] reading.", esp_err_to_name(err));
+			break;
+		}
+
+		/* Read SSID OP */
+		ESP_LOGI(TAG_NVS, "Reading PASSWORD from NVS...");
+
+		size_t pass_len = sizeof(wifi_data.password);
+		err = nvs_get_str(nvs_handle, "wifi_password", wifi_data.password, &pass_len);
+
+		switch(err)
+		{
+		case ESP_OK:
+			ESP_LOGI(TAG_NVS, "Done.");
+			ESP_LOGI(TAG_NVS, "NVS Wifi_ssid: %s", wifi_data.ssid);
+			ESP_LOGI(TAG_NVS, "NVS Wifi_password: %s", wifi_data.password);
+			break;
+
+		case ESP_ERR_NVS_NOT_FOUND:
+			ESP_LOGI(TAG_NVS, "The value is not init yet.");
+			break;
+
+		default:
+			ESP_LOGI(TAG_NVS, "Error [%s] reading.", esp_err_to_name(err));
+			break;
+		}
+	}
+
+	nvs_close(nvs_handle);
+}
+
+void read_NVS(void)
+{
+	/* Open NVS handle OP */
+	ESP_LOGI(TAG_NVS, "Opening NVS handle...");
+
+	nvs_handle_t nvs_handle;
+
+	esp_err_t err = init_NVS();
+	err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
+
+	if(err != ESP_OK)
+	{
+		ESP_LOGI(TAG_NVS, "Error [%s] opening NVS handle.\n", esp_err_to_name(err));
+	}
+	else
+	{
+		/* Read OP */
+		ESP_LOGI(TAG_NVS, "Done.");
+
+		ESP_LOGI(TAG_NVS, "Reading restart counter from NVS...");
+
+		err = nvs_get_i32(nvs_handle, "restart_counter", &restart_counter);
+		switch(err)
+		{
+		case ESP_OK:
+			ESP_LOGI(TAG_NVS, "Done.");
+			ESP_LOGI(TAG_NVS, "Restart counter = %d", restart_counter);
+			break;
+
+		case ESP_ERR_NVS_NOT_FOUND:
+			ESP_LOGI(TAG_NVS, "The value is not init yet.");
+			break;
+
+		default:
+			ESP_LOGI(TAG_NVS, "Error [%s] reading.", esp_err_to_name(err));
+			break;
+		}
+	}
+
+	/* Write OP */
+	ESP_LOGI(TAG_NVS, "Updating restart counter in NVS...");
+	restart_counter++;
+	err = nvs_set_i32(nvs_handle, "restart_counter", restart_counter);
+
+	if(err == ESP_OK)
+	{
+		ESP_LOGI(TAG_NVS, "Done.");
+	}
+	else
+	{
+		ESP_LOGI(TAG_NVS, "Failed.");
+	}
+
+	/* Commit value in NVS OP */
+	ESP_LOGI(TAG_NVS, "Committing updates in NVS...");
+	err = nvs_commit(nvs_handle);
+
+	if(err == ESP_OK)
+	{
+		ESP_LOGI(TAG_NVS, "Done.");
+	}
+	else
+	{
+		ESP_LOGI(TAG_NVS, "Failed.");
+	}
+
+	/* Close NVS */
+	nvs_close(nvs_handle);
+
+}
 /* ------------------- BME280 functions ------------------- */
 int8_t BME280_I2C_Write(uint8_t dev_addr, uint8_t reg_addr, uint8_t* reg_data, uint8_t cnt)
 {
@@ -577,6 +791,7 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 	}
 	else if(event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
 	{
+		ESP_LOGI(TAG_WIFI, "IP_EVENT_STA_GOT_IP");
 		xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 	}
 	else if(event_base == SC_EVENT && event_id == SC_EVENT_SCAN_DONE)
@@ -615,6 +830,9 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 		ESP_LOGI(TAG_SMART_CFG, "SSID: %s", ssid);
 		ESP_LOGI(TAG_SMART_CFG, "Password: %s", password);
 
+		/* Set field of wifi to NVS */
+		write_wifi_Credentials(ssid, password);
+
 		ESP_ERROR_CHECK(esp_wifi_disconnect());
 		ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
 		ESP_ERROR_CHECK(esp_wifi_connect());
@@ -623,9 +841,7 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 	{
 		xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
 	}
-
 }
-
 /* ------------------- HTTP functions / handlers ------------------- */
 esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
@@ -785,16 +1001,6 @@ static void update_time(void)
 	strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
 
 	ESP_LOGI(TAG_TIME, "Time has been updated.");
-}
-
-static void wait_Connect(EventBits_t uxBits)
-{
-	gpio_set_level(LED_BOARD, 1);
-	ESP_LOGW(TAG_SMART_CFG, "Waiting for connection to AP.");
-
-	while(!uxAccess) vTaskDelay(10);
-
-	gpio_set_level(LED_BOARD, 0);
 }
 /* ------------------- TASKS ------------------- */
 static void smartconfig_task(void *arg)
