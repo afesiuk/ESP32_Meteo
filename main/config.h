@@ -5,9 +5,10 @@
 #define RED_LED                    GPIO_NUM_25
 #define GREEN_LED                  GPIO_NUM_26
 #define BLUE_LED                   GPIO_NUM_27
+#define LED_BOARD                  GPIO_NUM_2
 /* ---------------------- Wi-Fi ---------------------- */
-#define WIFI_SSID                  "AirPort Extreme"
-#define WIFI_PASS                  "6735s41wty801"
+#define WIFI_SSID                  "AirPort Extreme" // -> Get from NVS
+#define WIFI_PASS                  "6735s41wty801"   // -> Get from NVS
 #define ESP_MAXIMUM_RETRY          5
 /* ---------------------- HTTP ----------------------- */
 #define START_HTTP_DELAY           60000
@@ -23,7 +24,7 @@
 /* ---------------- Server with MongoDB -------------- */
 #define IP_ADDR_SERVER             "192.168.1.192"
 #define PATH_SERVER                "/sensors"
-#define PORT_SERVER                8000  /* Default for transport_t: (80 or 443) */
+#define PORT_SERVER                8000  // Default for tcp transport_t: (80 or 443)
 /* --------------- SNTP server / time ---------------- */
 #define URL_NTP_SERVER             "pool.ntp.org"
 #define FORMAT_TIMEZONE_KIEV       "EET-2EEST,M3.5.0/3,M10.5.0/4"

@@ -4,6 +4,7 @@
  *
  * [BME280]  DRIVER:  https://github.com/BoschSensortec/BME280_driver
  * [MH-Z19B] LIBRARY: https://github.com/danielealbano/esp32-air-quality-monitor
+ * [ESP-IDF EXAMPLES] REPOSITORY: https://github.com/espressif/esp-idf
  *
  * UART_NUM_0 - Used for USB-PC transfer [Don't use]
  *
@@ -61,8 +62,6 @@
 #include "config.h"
 
 #include "esp_err.h"
-#include "esp_log.h"
-#include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -72,6 +71,7 @@
 
 #include "bme280.h"
 #include "mhz19.h"
+#include "sensors_support.h"
 #include "nvs_flash.h"
 
 #include "esp_http_client.h"
@@ -102,14 +102,8 @@
 #define TAG_TIME                   "Time_SNTP"
 #define TAG_SMART_CFG              "Smart_Config"
 
-#define LED_BOARD                  GPIO_NUM_2
-
 #define I2C_MASTER_ACK             0
 #define I2C_MASTER_NACK            1
-
-#define TEST_URL_POST              "http://httpbin.org/post"
-#define TEST_URL_PUT               "http://httpbin.org/put"
-#define TEST_URL_GET               "http://httpbin.org/get"
 
 #define WIFI_CONNECTED_BIT         BIT0
 #define WIFI_FAIL_BIT              BIT1
@@ -129,7 +123,6 @@ void delay_ms(uint32_t ms);
 void Error_Check_MH_Z19B(mhz19_err_t error);
 void Message_HTTP_Client(esp_http_client_method_t method);
 void time_sync_notification_cb(struct timeval *tv);
-void read_NVS(void);
 
 static void wait_Connect(EventBits_t uxBits);
 static void obtain_time(void);
@@ -143,16 +136,6 @@ static void event_handler(void* arg,
 
 esp_err_t _http_event_handler(
 		esp_http_client_event_t *evt);
-
-int8_t BME280_I2C_Write(uint8_t dev_addr,
-		uint8_t reg_addr,
-		uint8_t* reg_data,
-		uint8_t count);
-
-int8_t BME280_I2C_Read(uint8_t dev_addr,
-		uint8_t reg_addr,
-		uint8_t* reg_data,
-		uint8_t count);
 
 char* Data_for_req(void);
 
@@ -181,6 +164,10 @@ struct wifi_credentials_t {
 	char password[WIFI_FIELD_SIZE];
 }wifi_data;
 
+uint8_t xAccessOp    = 0;
+uint8_t xSmartConfig = 0;
+uint8_t xDefaultMode = 0;
+
 int32_t mhz19b_temperature = 0;
 int32_t mhz19b_co2         = 0;
 
@@ -191,11 +178,10 @@ double bme280_pressure    = 0;
 char strftime_buf[SRTF_TIME_BUFFER] = {0};
 char local_response_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};
 
+static uint8_t retry_cnt = 0;
 static EventBits_t uxBits;
 static EventGroupHandle_t s_wifi_event_group; // FreeRTOS event group to signal when we are connected
 static time_t now;
-
-uint8_t uxAccess = 0;
 
 QueueHandle_t uart_queue;
 uart_port_t uart_num = UART_PORT;
@@ -206,8 +192,6 @@ const char* bme280_p_req  = "press_bme";
 const char* mhz19b_c_req  = "co2_mhz";
 const char* mhz19b_t_req  = "temp_mhz";
 const char* date_time_req = "date_time";
-
-int32_t restart_counter = 0;
 /* ------------------- MAIN function ------------------- */
 void app_main(void)
 {
@@ -220,8 +204,6 @@ void app_main(void)
 	wait_Connect(uxBits); // Wait until device is connected to AP
 	init_SNTP();
 	init_Time();
-	//read_NVS();
-	read_wifi_Credentials();
 	/* --- Start functions --- */
 	start_message();
 	/* -------- Tasks -------- */
@@ -301,6 +283,8 @@ esp_err_t init_NVS(void)
 
 void init_Wifi_SmartConfig(void)
 {
+	xDefaultMode = 1;
+
 	ESP_ERROR_CHECK(esp_netif_init());
 	s_wifi_event_group = xEventGroupCreate();
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -312,12 +296,93 @@ void init_Wifi_SmartConfig(void)
 	wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
 	ESP_ERROR_CHECK(esp_wifi_init(&config));
 
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
+	esp_event_handler_t instance_any_id;
+	esp_event_handler_t instance_got_ip;
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
+	ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT,
+			ESP_EVENT_ANY_ID, &event_handler, &instance_any_id));
+
+	ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT,
+			IP_EVENT_STA_GOT_IP, &event_handler, &instance_got_ip));
+
+	read_wifi_Credentials();
+
+    wifi_config_t wifi_config = {
+    		.sta = {
+					.threshold.authmode = WIFI_AUTH_WPA2_PSK,
+					.pmf_cfg = {
+							.capable = true,
+							.required = false
+    				},
+    		},
+    };
+    /* Set ssid and password fields in wifi_config */
+    memcpy(wifi_config.sta.ssid, (uint8_t*) wifi_data.ssid, sizeof(wifi_data.ssid));
+    memcpy(wifi_config.sta.password, (uint8_t*) wifi_data.password, sizeof(wifi_data.password));
+
+	ESP_LOGI(TAG_WIFI, "SSID     [config]: %s", wifi_config.sta.ssid);
+	ESP_LOGI(TAG_WIFI, "PASSWORD [config]: %s", wifi_config.sta.password);
+
+	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+	ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+	ESP_ERROR_CHECK(esp_wifi_start());
+
+	EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+			WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+			pdFALSE,
+			pdFALSE,
+			portMAX_DELAY);
+
+	if(bits & WIFI_CONNECTED_BIT)
+	{
+		ESP_LOGI(TAG_WIFI, "Connected to Wi-fi Access Point, SSID: %s | Password: %s",
+				wifi_config.sta.ssid, wifi_config.sta.password);
+	}
+	else if(bits & WIFI_FAIL_BIT)
+	{
+		ESP_LOGI(TAG_WIFI, "Failed to connect, SSID: %s | Password: %s",
+				wifi_config.sta.ssid, wifi_config.sta.password);
+
+		/* Change DefaultMode -> See event_handler */
+		xDefaultMode = 0;
+
+		/* Unregister old event handlers */
+		ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT,
+				ESP_EVENT_ANY_ID, instance_any_id));
+
+		ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT,
+				IP_EVENT_STA_GOT_IP, instance_got_ip));
+
+		/* Full turn off wifi */
+	    ESP_ERROR_CHECK(esp_wifi_disconnect());
+	    ESP_ERROR_CHECK(esp_wifi_stop());
+	    ESP_ERROR_CHECK(esp_wifi_deinit());
+
+	    /* Reinit s_wifi_event_group */
+	    vEventGroupDelete(s_wifi_event_group);
+		s_wifi_event_group = xEventGroupCreate();
+
+		/* Init config */
+		wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
+		ESP_ERROR_CHECK(esp_wifi_init(&config));
+
+		/* Register new handlers */
+		esp_event_handler_t smartconfig_any_id;
+		esp_event_handler_t smartconfig_got_ip;
+		ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT,
+				ESP_EVENT_ANY_ID, &event_handler, &smartconfig_any_id));
+		ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT,
+				IP_EVENT_STA_GOT_IP, &event_handler, &smartconfig_got_ip));
+	    ESP_ERROR_CHECK(esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
+
+	    /* Set mode and start wifi */
+	    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+	    ESP_ERROR_CHECK(esp_wifi_start());
+	}
+	else
+	{
+		ESP_LOGE(TAG_WIFI, "UNEXPECTED EVENT");
+	}
 }
 
 void init_MH_Z19B(void)
@@ -519,9 +584,7 @@ static void wait_Connect(EventBits_t uxBits)
 {
 	gpio_set_level(LED_BOARD, 1);
 	ESP_LOGW(TAG_SMART_CFG, "Waiting for connection to AP.");
-
-	while(!uxAccess) vTaskDelay(10);
-
+	while(!xAccessOp) vTaskDelay(10);
 	gpio_set_level(LED_BOARD, 0);
 }
 
@@ -548,29 +611,15 @@ void write_wifi_Credentials(uint8_t* ssid, uint8_t* password)
 	ESP_LOGE(TAG_NVS, "PASSWORD: %s", (char*) password);
 
 	err = nvs_set_str(nvs_handle, "wifi_ssid", (char*) ssid);
-	err = nvs_set_str(nvs_handle, "wifi_password", (char*) password);
+	ESP_LOGI(TAG_NVS, "%s", err == ESP_OK ? "Done" : "Failed");
 
-	if(err == ESP_OK)
-	{
-		ESP_LOGI(TAG_NVS, "Done.");
-	}
-	else
-	{
-		ESP_LOGI(TAG_NVS, "Failed.");
-	}
+	err = nvs_set_str(nvs_handle, "wifi_password", (char*) password);
+	ESP_LOGI(TAG_NVS, "%s", err == ESP_OK ? "Done" : "Failed");
 
 	/* Commit value in NVS OP */
 	ESP_LOGI(TAG_NVS, "Committing updates in NVS...");
 	err = nvs_commit(nvs_handle);
-
-	if(err == ESP_OK)
-	{
-		ESP_LOGI(TAG_NVS, "Done.");
-	}
-	else
-	{
-		ESP_LOGI(TAG_NVS, "Failed.");
-	}
+	ESP_LOGI(TAG_NVS, "%s", err == ESP_OK ? "Done" : "Failed");
 
 	/* Close NVS */
 	nvs_close(nvs_handle);
@@ -641,158 +690,54 @@ void read_wifi_Credentials(void)
 
 	nvs_close(nvs_handle);
 }
-
-void read_NVS(void)
-{
-	/* Open NVS handle OP */
-	ESP_LOGI(TAG_NVS, "Opening NVS handle...");
-
-	nvs_handle_t nvs_handle;
-
-	esp_err_t err = init_NVS();
-	err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
-
-	if(err != ESP_OK)
-	{
-		ESP_LOGI(TAG_NVS, "Error [%s] opening NVS handle.\n", esp_err_to_name(err));
-	}
-	else
-	{
-		/* Read OP */
-		ESP_LOGI(TAG_NVS, "Done.");
-
-		ESP_LOGI(TAG_NVS, "Reading restart counter from NVS...");
-
-		err = nvs_get_i32(nvs_handle, "restart_counter", &restart_counter);
-		switch(err)
-		{
-		case ESP_OK:
-			ESP_LOGI(TAG_NVS, "Done.");
-			ESP_LOGI(TAG_NVS, "Restart counter = %d", restart_counter);
-			break;
-
-		case ESP_ERR_NVS_NOT_FOUND:
-			ESP_LOGI(TAG_NVS, "The value is not init yet.");
-			break;
-
-		default:
-			ESP_LOGI(TAG_NVS, "Error [%s] reading.", esp_err_to_name(err));
-			break;
-		}
-	}
-
-	/* Write OP */
-	ESP_LOGI(TAG_NVS, "Updating restart counter in NVS...");
-	restart_counter++;
-	err = nvs_set_i32(nvs_handle, "restart_counter", restart_counter);
-
-	if(err == ESP_OK)
-	{
-		ESP_LOGI(TAG_NVS, "Done.");
-	}
-	else
-	{
-		ESP_LOGI(TAG_NVS, "Failed.");
-	}
-
-	/* Commit value in NVS OP */
-	ESP_LOGI(TAG_NVS, "Committing updates in NVS...");
-	err = nvs_commit(nvs_handle);
-
-	if(err == ESP_OK)
-	{
-		ESP_LOGI(TAG_NVS, "Done.");
-	}
-	else
-	{
-		ESP_LOGI(TAG_NVS, "Failed.");
-	}
-
-	/* Close NVS */
-	nvs_close(nvs_handle);
-
-}
-/* ------------------- BME280 functions ------------------- */
-int8_t BME280_I2C_Write(uint8_t dev_addr, uint8_t reg_addr, uint8_t* reg_data, uint8_t cnt)
-{
-	int32_t iError = BME280_INIT_VALUE;
-
-	esp_err_t espRc;
-	i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-
-	i2c_master_start(cmd);
-	i2c_master_write_byte(cmd, (dev_addr << 1) | I2C_MASTER_WRITE, true);
-
-	i2c_master_write_byte(cmd, reg_addr, true);
-	i2c_master_write(cmd, reg_data, cnt, true);
-	i2c_master_stop(cmd);
-
-	espRc = i2c_master_cmd_begin(I2C_NUM_0, cmd, 10 / portTICK_PERIOD_MS);
-
-	if(espRc == ESP_OK)
-	{
-		iError = SUCCESS;
-	}
-	else
-	{
-		iError = FAIL;
-	}
-
-	i2c_cmd_link_delete(cmd);
-
-	return (int8_t) iError;
-}
-
-int8_t BME280_I2C_Read(uint8_t dev_addr, uint8_t reg_addr, uint8_t* reg_data, uint8_t cnt)
-{
-	int32_t iError = BME280_INIT_VALUE;
-	esp_err_t espRc;
-
-	i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-
-	i2c_master_start(cmd);
-	i2c_master_write_byte(cmd, (dev_addr << 1) | I2C_MASTER_WRITE, true);
-	i2c_master_write_byte(cmd, reg_addr, true);
-
-	i2c_master_start(cmd);
-	i2c_master_write_byte(cmd, (dev_addr << 1) | I2C_MASTER_READ, true);
-
-	if(cnt > 1) i2c_master_read(cmd, reg_data, cnt - 1, I2C_MASTER_ACK);
-
-	i2c_master_read_byte(cmd, reg_data + cnt - 1, I2C_MASTER_NACK);
-	i2c_master_stop(cmd);
-
-	espRc = i2c_master_cmd_begin(I2C_NUM_0, cmd, 10 / portTICK_PERIOD_MS);
-
-	if(espRc == ESP_OK)
-	{
-		iError = SUCCESS;
-	}
-	else
-	{
-		iError = FAIL;
-	}
-
-	i2c_cmd_link_delete(cmd);
-
-	return (int8_t) iError;
-}
 /* ------------------- WI-FI functions / handlers ------------------- */
 static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
 	if(event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
 	{
-		xTaskCreate(smartconfig_task, "smartconfig_task", TASK_STACK_SIZE * 2, NULL, 3, NULL);
+		if(xDefaultMode)
+		{
+			esp_wifi_connect();
+		}
+		else
+		{
+			xTaskCreate(smartconfig_task, "smartconfig_task", TASK_STACK_SIZE * 2, NULL, 3, NULL);
+		}
+
 	}
 	else if(event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
 	{
-		esp_wifi_connect();
-		xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+		if(xDefaultMode)
+		{
+			if(retry_cnt < ESP_MAXIMUM_RETRY)
+			{
+				esp_wifi_connect();
+				retry_cnt++;
+				ESP_LOGI(TAG_WIFI, "Retry to connect to the AP.");
+			}
+			else
+			{
+				xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+			}
+			ESP_LOGI(TAG_WIFI, "Connect to the AP fail.");
+		}
+		else
+		{
+			esp_wifi_connect();
+			xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+		}
 	}
 	else if(event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
 	{
+		if(xDefaultMode)
+		{
+			ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+			ESP_LOGI(TAG_WIFI, "Got ip: " IPSTR, IP2STR(&event->ip_info.ip));
+			retry_cnt = 0;
+		}
 		ESP_LOGI(TAG_WIFI, "IP_EVENT_STA_GOT_IP");
 		xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+		xAccessOp = 1;
 	}
 	else if(event_base == SC_EVENT && event_id == SC_EVENT_SCAN_DONE)
 	{
@@ -830,7 +775,7 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
 		ESP_LOGI(TAG_SMART_CFG, "SSID: %s", ssid);
 		ESP_LOGI(TAG_SMART_CFG, "Password: %s", password);
 
-		/* Set field of wifi to NVS */
+		/* Set fields of wifi to NVS */
 		write_wifi_Credentials(ssid, password);
 
 		ESP_ERROR_CHECK(esp_wifi_disconnect());
@@ -1006,7 +951,9 @@ static void update_time(void)
 static void smartconfig_task(void *arg)
 {
 	ESP_ERROR_CHECK(esp_smartconfig_set_type(SC_TYPE_ESPTOUCH));
+
 	smartconfig_start_config_t config = SMARTCONFIG_START_CONFIG_DEFAULT();
+
 	ESP_ERROR_CHECK(esp_smartconfig_start(&config));
 
 	for(;;)
@@ -1016,12 +963,12 @@ static void smartconfig_task(void *arg)
 
 		if(uxBits & WIFI_CONNECTED_BIT)
 		{
-			ESP_LOGI(TAG_SMART_CFG, "Wifi connected to AP.");
-			uxAccess = 1;
+			ESP_LOGI(TAG_SMART_CFG, "Device connected to AP.");
+			xAccessOp = 1;
 		}
 		if(uxBits & WIFI_FAIL_BIT)
 		{
-			ESP_LOGI(TAG_SMART_CFG, "Smartconfig task over.");
+			ESP_LOGI(TAG_SMART_CFG, "SmartConfig task is over.");
 			esp_smartconfig_stop();
 			vTaskDelete(NULL);
 		}
