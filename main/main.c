@@ -353,7 +353,7 @@ void init_Wifi_SmartConfig(void)
 		ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT,
 				IP_EVENT_STA_GOT_IP, instance_got_ip));
 
-		/* Full turn off wifi */
+		/* Full turn off wifi module */
 	    ESP_ERROR_CHECK(esp_wifi_disconnect());
 	    ESP_ERROR_CHECK(esp_wifi_stop());
 	    ESP_ERROR_CHECK(esp_wifi_deinit());
@@ -390,7 +390,7 @@ void init_MH_Z19B(void)
 	ESP_LOGI(TAG_MHZ19B, "Init MH-Z19B start.");
 
 	mhz19_init(uart_num);
-	mhz19_set_auto_calibration(false);
+	mhz19_set_auto_calibration(true);
 	mhz19_set_range(MEASURE_RANGE);
 
 	ESP_LOGI(TAG_MHZ19B, "Init MH-Z19B done.");
@@ -410,10 +410,12 @@ int32_t init_BME280(void)
 
 	/* Set 16x oversampling for more correct data */
 	com_rslt += bme280_set_oversamp_pressure(BME280_OVERSAMP_16X);
-	com_rslt += bme280_set_oversamp_temperature(BME280_OVERSAMP_16X);
-	com_rslt += bme280_set_oversamp_humidity(BME280_OVERSAMP_16X);
+	com_rslt += bme280_set_oversamp_temperature(BME280_OVERSAMP_8X);
+	com_rslt += bme280_set_oversamp_humidity(BME280_OVERSAMP_8X);
 
-	com_rslt += bme280_set_filter(BME280_FILTER_COEFF_OFF);
+	com_rslt += bme280_set_standby_durn(BME280_STANDBY_TIME_1_MS);
+	com_rslt += bme280_set_filter(BME280_FILTER_COEFF_16);
+	com_rslt += bme280_set_power_mode(BME280_NORMAL_MODE);
 
 	ESP_LOGI(TAG_BME280, "Init BME280 done.");
 
@@ -932,7 +934,7 @@ static void obtain_time(void)
 	while(sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count)
 	{
 		ESP_LOGI(TAG_TIME, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
-		vTaskDelay(2000 / portTICK_PERIOD_MS);
+		delay_ms(2000);
 	}
 
 	time(&now);
@@ -989,7 +991,7 @@ static void bme280_check_task(void *arg)
 		{
 			ESP_LOGE(TAG_BME280, "Init or setting error | Code: %d", com_rslt);
 			com_rslt = init_BME280();
-			vTaskDelay(5000 / portTICK_PERIOD_MS);
+			delay_ms(5000);
 			continue;
 		}
 
@@ -1015,7 +1017,7 @@ static void bme280_check_task(void *arg)
 			ESP_LOGE(TAG_BME280, "Measure error | code: %d", com_rslt);
 		}
 
-		vTaskDelay(BME280_MEASURE_DELAY / portTICK_PERIOD_MS);
+		delay_ms(BME280_MEASURE_DELAY);
 	}
 
 	vTaskDelete(NULL);
@@ -1027,11 +1029,11 @@ static void mhz19b_check_task(void *arg)
 
 	mhz19_err_t mhz19b_error;
 
-	vTaskDelay(START_MEASURE_DELAY / portTICK_PERIOD_MS);
+	delay_ms(START_MEASURE_DELAY);
 
 	for(;;)
 	{
-		vTaskDelay(MHZ19B_MEASURE_DELAY / portTICK_PERIOD_MS);
+		delay_ms(MHZ19B_MEASURE_DELAY);
 
 		mhz19b_error = mhz19_retrieve_data();
 
@@ -1058,7 +1060,7 @@ static void mhz19b_check_task(void *arg)
 static void co2_led_task(void *arg)
 {
 	/* Wait until MH-Z19B will get actual data */
-	vTaskDelay(START_MEASURE_DELAY / portTICK_PERIOD_MS);
+	delay_ms(START_MEASURE_DELAY);
 
 	for(;;)
 	{
@@ -1091,7 +1093,7 @@ static void co2_led_task(void *arg)
 			gpio_set_level(BLUE_LED, 0);
 		}
 
-		vTaskDelay(5000);
+		delay_ms(2000);
 	}
 
 	vTaskDelete(NULL);
@@ -1102,19 +1104,19 @@ static void http_request_task(void *arg)
 	char* request;
 
 	/* TODO: [After test] Set delay for > 10 min 'cause MH-Z19B need more time to get correct data */
-	vTaskDelay(START_HTTP_DELAY / portTICK_PERIOD_MS);
+	delay_ms(START_HTTP_DELAY);
 
 	for(;;)
 	{
 		update_time();
 
-		/* Create request to server */
+		/* Create body of request to server */
 		request = Data_for_req();
 
-		/* Send body of request */
+		/* Create and send HTTP request */
 		http_request(HTTP_METHOD_POST, (char*) request);
 
-		vTaskDelay(REQUEST_HTTP_DELAY / portTICK_PERIOD_MS);
+		delay_ms(REQUEST_HTTP_DELAY);
 	}
 
 	vTaskDelete(NULL);
