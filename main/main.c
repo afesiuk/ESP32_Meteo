@@ -52,36 +52,30 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
-#include "esp_system.h"
-#include "esp_spi_flash.h"
 /* ------ Private Additional includes ------ */
 #include "driver/uart.h"
 #include "driver/i2c.h"
 #include "driver/gpio.h"
 
-#include "config.h"
-
 #include "esp_err.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_http_client.h"
+#include "esp_tls.h"
+#include "esp_netif.h"
+#include "esp_attr.h"
+#include "esp_sntp.h"
+#include "esp_smartconfig.h"
 
 #include "lwip/err.h"
 #include "lwip/sys.h"
 
+#include "config.h"
 #include "bme280.h"
 #include "mhz19.h"
 #include "sensors_support.h"
 #include "nvs_flash.h"
-
-#include "esp_http_client.h"
-#include "esp_tls.h"
-#include "esp_netif.h"
-
-#include "esp_attr.h"
-#include "esp_sntp.h"
-
-#include "esp_smartconfig.h"
 /* ------ Private defines ------ */
 #define SIZE_FOR_DATA              26
 
@@ -284,7 +278,6 @@ esp_err_t init_NVS(void)
 void init_Wifi_SmartConfig(void)
 {
 	xDefaultMode = 1;
-
 	ESP_ERROR_CHECK(esp_netif_init());
 	s_wifi_event_group = xEventGroupCreate();
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -316,6 +309,7 @@ void init_Wifi_SmartConfig(void)
     				},
     		},
     };
+
     /* Set ssid and password fields in wifi_config */
     memcpy(wifi_config.sta.ssid, (uint8_t*) wifi_data.ssid, sizeof(wifi_data.ssid));
     memcpy(wifi_config.sta.password, (uint8_t*) wifi_data.password, sizeof(wifi_data.password));
@@ -353,7 +347,7 @@ void init_Wifi_SmartConfig(void)
 		ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT,
 				IP_EVENT_STA_GOT_IP, instance_got_ip));
 
-		/* Full turn off wifi module */
+		/* Turn off wifi */
 	    ESP_ERROR_CHECK(esp_wifi_disconnect());
 	    ESP_ERROR_CHECK(esp_wifi_stop());
 	    ESP_ERROR_CHECK(esp_wifi_deinit());
@@ -408,12 +402,12 @@ int32_t init_BME280(void)
 
 	int32_t com_rslt = bme280_init(&bme280);
 
-	/* Set 16x oversampling for more correct data */
-	com_rslt += bme280_set_oversamp_pressure(BME280_OVERSAMP_16X);
-	com_rslt += bme280_set_oversamp_temperature(BME280_OVERSAMP_8X);
-	com_rslt += bme280_set_oversamp_humidity(BME280_OVERSAMP_8X);
+	/* Default settings: pressure - 16X, temperature - 2X, humidity - 1X */
+	com_rslt += bme280_set_oversamp_pressure(BME280_OVERSAMP_PRESSURE);
+	com_rslt += bme280_set_oversamp_temperature(BME280_OVERSAMP_TEMP);
+	com_rslt += bme280_set_oversamp_humidity(BME280_OVERSAMP_HUMIDITY);
 
-	com_rslt += bme280_set_standby_durn(BME280_STANDBY_TIME_1_MS);
+	com_rslt += bme280_set_standby_durn(BME280_STANDBY_TIME);
 	com_rslt += bme280_set_filter(BME280_FILTER_COEFF_16);
 	com_rslt += bme280_set_power_mode(BME280_NORMAL_MODE);
 
@@ -640,6 +634,10 @@ void read_wifi_Credentials(void)
 	if(err != ESP_OK)
 	{
 		ESP_LOGI(TAG_NVS, "Error [%s] opening NVS handle.\n", esp_err_to_name(err));
+
+		ESP_LOGI(TAG_NVS, "Set default values to wifi_data.");
+	    memcpy(wifi_data.ssid, (uint8_t*) "default", 7);
+	    memcpy(wifi_data.password, (uint8_t*) "default", 7);
 	}
 	else
 	{
@@ -676,8 +674,8 @@ void read_wifi_Credentials(void)
 		{
 		case ESP_OK:
 			ESP_LOGI(TAG_NVS, "Done.");
-			ESP_LOGI(TAG_NVS, "NVS Wifi_ssid: %s", wifi_data.ssid);
-			ESP_LOGI(TAG_NVS, "NVS Wifi_password: %s", wifi_data.password);
+			ESP_LOGI(TAG_NVS, "NVS Wifi_SSID: %s", wifi_data.ssid);
+			ESP_LOGI(TAG_NVS, "NVS Wifi_Password: %s", wifi_data.password);
 			break;
 
 		case ESP_ERR_NVS_NOT_FOUND:
@@ -927,7 +925,7 @@ void time_sync_notification_cb(struct timeval *tv)
 static void obtain_time(void)
 {
 	uint8_t retry = 0;
-	uint8_t retry_count = 10;
+	uint8_t retry_count = SNTP_RETRY_CONNECT;
 	time_t now = 0;
 	struct tm timeinfo = {0};
 
@@ -1040,11 +1038,9 @@ static void mhz19b_check_task(void *arg)
 		if(mhz19b_error != MHZ19_ERR_OK)
 		{
 			Error_Check_MH_Z19B(mhz19b_error);
-
 			/* data of sensor -> 0 'cause we don't get actual data */
 			mhz19b_co2 = 0;
 			mhz19b_temperature = 0;
-
 			continue;
 		}
 
@@ -1064,8 +1060,8 @@ static void co2_led_task(void *arg)
 
 	for(;;)
 	{
-		/* If the MH-Z19B doesn't work correctly -> turn off rgb-led */
-		if(mhz19b_co2 == 0 || mhz19b_co2 == 410)
+		/* If the MH-Z19B doesn't work properly -> turn off rgb-led */
+		if(mhz19b_co2 == 0)
 		{
 			gpio_set_level(RED_LED, 0);
 			gpio_set_level(GREEN_LED, 0);
@@ -1109,13 +1105,10 @@ static void http_request_task(void *arg)
 	for(;;)
 	{
 		update_time();
-
 		/* Create body of request to server */
 		request = Data_for_req();
-
 		/* Create and send HTTP request */
 		http_request(HTTP_METHOD_POST, (char*) request);
-
 		delay_ms(REQUEST_HTTP_DELAY);
 	}
 
