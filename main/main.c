@@ -2,9 +2,9 @@
  * Project name: ESP32_Meteo
  * Author: Alex Fesyuk
  *
- * [BME280]  DRIVER:  https://github.com/BoschSensortec/BME280_driver
- * [MH-Z19B] LIBRARY: https://github.com/danielealbano/esp32-air-quality-monitor
- * [ESP-IDF EXAMPLES] REPOSITORY: https://github.com/espressif/esp-idf
+ * [BME280]  DRIVER:   https://github.com/BoschSensortec/BME280_driver
+ * [MH-Z19B] LIBRARY:  https://github.com/danielealbano/esp32-air-quality-monitor
+ * [ESP-IDF] EXAMPLES: https://github.com/espressif/esp-idf
  *
  * UART_NUM_0 - Used for USB-PC transfer [Don't use]
  *
@@ -77,14 +77,12 @@
 #include "sensors_support.h"
 #include "nvs_flash.h"
 /* ------ Private defines ------ */
-#define SIZE_FOR_DATA              26
-
 #define BUFFER_SIZE_T              1024
 #define TASK_STACK_SIZE            2048
 #define HTTP_TASK_STACK_SIZE       8192
 #define MAX_HTTP_RECV_BUFFER       512
 #define MAX_HTTP_OUTPUT_BUFFER     2048
-#define SRTF_TIME_BUFFER           64
+#define STRF_TIME_BUFFER           64
 #define WIFI_FIELD_SIZE            30
 
 #define TAG_INFO                   "INFO"
@@ -105,36 +103,29 @@
 void init_UART(void);
 void init_I2C (void);
 void init_GPIO(void);
-esp_err_t init_NVS (void);
 void init_MH_Z19B(void);
 void init_SNTP(void);
 void init_Time(void);
-int32_t init_BME280(void);
 void init_Wifi_SmartConfig(void);
+esp_err_t init_NVS (void);
+int32_t init_BME280(void);
 
 void start_message();
 void delay_ms(uint32_t ms);
 void Error_Check_MH_Z19B(mhz19_err_t error);
 void Message_HTTP_Client(esp_http_client_method_t method);
 void time_sync_notification_cb(struct timeval *tv);
+void write_wifi_Credentials(uint8_t* ssid, uint8_t* password);
+void read_wifi_Credentials(void);
 
+esp_err_t _http_event_handler(esp_http_client_event_t *evt);
 static void wait_Connect(EventBits_t uxBits);
 static void obtain_time(void);
-
 static void http_request(esp_http_client_method_t method, char* post_data);
-
 static void event_handler(void* arg,
 		esp_event_base_t event_base,
 		int32_t event_id,
 		void* event_data);
-
-esp_err_t _http_event_handler(
-		esp_http_client_event_t *evt);
-
-char* Data_for_req(void);
-
-void write_wifi_Credentials(uint8_t* ssid, uint8_t* password);
-void read_wifi_Credentials(void);
 /* ------ Private Tasks prototypes ------ */
 static void smartconfig_task(void *arg);
 static void bme280_check_task(void *arg);
@@ -142,21 +133,13 @@ static void mhz19b_check_task(void *arg);
 static void http_request_task(void *arg);
 static void co2_led_task(void *arg);
 /* ------ Private variables ------ */
-struct bme280_t bme280;
-struct tm timeinfo;
-
-struct data_request_t {
-	char mzh_co2[SIZE_FOR_DATA];
-	char mzh_temperature[SIZE_FOR_DATA];
-	char bme_temperature[SIZE_FOR_DATA];
-	char bme_humidity[SIZE_FOR_DATA];
-	char bme_pressure[SIZE_FOR_DATA];
-} data_request;
-
 struct wifi_credentials_t {
 	char ssid[WIFI_FIELD_SIZE];
 	char password[WIFI_FIELD_SIZE];
 }wifi_data;
+
+struct bme280_t bme280;
+struct tm timeinfo;
 
 uint8_t xAccessOp    = 0;
 uint8_t xSmartConfig = 0;
@@ -169,7 +152,7 @@ double bme280_temperature = 0;
 double bme280_humidity    = 0;
 double bme280_pressure    = 0;
 
-char strftime_buf[SRTF_TIME_BUFFER] = {0};
+char strftime_buf[STRF_TIME_BUFFER] = {0};
 char local_response_buffer[MAX_HTTP_OUTPUT_BUFFER] = {0};
 
 static uint8_t retry_cnt = 0;
@@ -179,6 +162,7 @@ static time_t now;
 
 QueueHandle_t uart_queue;
 uart_port_t uart_num = UART_PORT;
+
 /* Requests templates for x-www-form-urlencoded */
 const char* bme280_t_req  = "temp_bme";
 const char* bme280_h_req  = "hum_bme";
@@ -210,7 +194,6 @@ void app_main(void)
 /* ------------------- Init Periphal ------------------- */
 void init_UART(void)
 {
-	/* Init UART for MH-Z19B */
 	uart_config_t uart_config = {
 			.baud_rate = MHZ19B_BAUDRATE,
 			.data_bits = UART_DATA_8_BITS,
@@ -300,15 +283,15 @@ void init_Wifi_SmartConfig(void)
 
 	read_wifi_Credentials();
 
-    wifi_config_t wifi_config = {
-    		.sta = {
+	wifi_config_t wifi_config = {
+			.sta = {
 					.threshold.authmode = WIFI_AUTH_WPA2_PSK,
 					.pmf_cfg = {
 							.capable = true,
 							.required = false
-    				},
-    		},
-    };
+					},
+			},
+	};
 
     /* Set ssid and password fields in wifi_config */
     memcpy(wifi_config.sta.ssid, (uint8_t*) wifi_data.ssid, sizeof(wifi_data.ssid));
@@ -384,7 +367,7 @@ void init_MH_Z19B(void)
 	ESP_LOGI(TAG_MHZ19B, "Init MH-Z19B start.");
 
 	mhz19_init(uart_num);
-	mhz19_set_auto_calibration(true);
+	mhz19_set_auto_calibration(false);
 	mhz19_set_range(MEASURE_RANGE);
 
 	ESP_LOGI(TAG_MHZ19B, "Init MH-Z19B done.");
@@ -530,52 +513,6 @@ void Message_HTTP_Client(esp_http_client_method_t method)
 	}
 }
 
-char* Data_for_req(void)
-{
-	char* request = NULL;
-
-	for(uint8_t i = 0; i < 5; i++)
-	{
-		switch(i)
-		{
-		case 0:
-			sprintf(data_request.mzh_co2, "%ld", (long int) mhz19b_co2);
-			break;
-
-		case 1:
-			sprintf(data_request.mzh_temperature, "%ld", (long int) mhz19b_temperature);
-			break;
-
-		case 2:
-			sprintf(data_request.bme_temperature, "%.2f", bme280_temperature);
-			break;
-
-		case 3:
-			sprintf(data_request.bme_humidity, "%.2f", bme280_humidity);
-			break;
-
-		case 4:
-			sprintf(data_request.bme_pressure, "%.2f", bme280_pressure);
-			break;
-		}
-	}
-
-	asprintf(&request, "%s=%s&%s=%s&%s=%s&%s=%s&%s=%s&%s=%s",
-			mhz19b_c_req, data_request.mzh_co2,
-			mhz19b_t_req, data_request.mzh_temperature,
-			bme280_t_req, data_request.bme_temperature,
-			bme280_h_req, data_request.bme_humidity,
-			bme280_p_req, data_request.bme_pressure,
-			date_time_req, strftime_buf);
-
-	if(request != NULL)
-	{
-		return request;
-	}
-
-	return (char*) '0';
-}
-
 static void wait_Connect(EventBits_t uxBits)
 {
 	gpio_set_level(LED_BOARD, 1);
@@ -664,7 +601,7 @@ void read_wifi_Credentials(void)
 			break;
 		}
 
-		/* Read SSID OP */
+		/* Read PASSWORD OP */
 		ESP_LOGI(TAG_NVS, "Reading PASSWORD from NVS...");
 
 		size_t pass_len = sizeof(wifi_data.password);
@@ -924,10 +861,10 @@ void time_sync_notification_cb(struct timeval *tv)
 
 static void obtain_time(void)
 {
+	struct tm timeinfo = {0};
+	time_t now = 0;
 	uint8_t retry = 0;
 	uint8_t retry_count = SNTP_RETRY_CONNECT;
-	time_t now = 0;
-	struct tm timeinfo = {0};
 
 	while(sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count)
 	{
@@ -1044,7 +981,7 @@ static void mhz19b_check_task(void *arg)
 			continue;
 		}
 
-		mhz19b_co2  = mhz19_get_co2();
+		mhz19b_co2  = mhz19_get_co2() * 0.4;
 		mhz19b_temperature = mhz19_get_temperature();
 
 		ESP_LOGI(TAG_MHZ19B, "CO2: %d | Temperature: %d", mhz19b_co2, mhz19b_temperature);
@@ -1097,7 +1034,7 @@ static void co2_led_task(void *arg)
 
 static void http_request_task(void *arg)
 {
-	char* request;
+	char* request = NULL;
 
 	/* TODO: [After test] Set delay for > 10 min 'cause MH-Z19B need more time to get correct data */
 	delay_ms(START_HTTP_DELAY);
@@ -1106,9 +1043,18 @@ static void http_request_task(void *arg)
 	{
 		update_time();
 		/* Create body of request to server */
-		request = Data_for_req();
+		asprintf(&request, "%s=%ld&%s=%ld&%s=%.2f&%s=%.2f&%s=%.2f&%s=%s",
+				mhz19b_c_req, (long int) mhz19b_co2,
+				mhz19b_t_req, (long int) mhz19b_temperature,
+				bme280_t_req, bme280_temperature,
+				bme280_h_req, bme280_humidity,
+				bme280_p_req, bme280_pressure,
+				date_time_req, strftime_buf);
 		/* Create and send HTTP request */
 		http_request(HTTP_METHOD_POST, (char*) request);
+		/* free allocated memory */
+		free(request);
+
 		delay_ms(REQUEST_HTTP_DELAY);
 	}
 
