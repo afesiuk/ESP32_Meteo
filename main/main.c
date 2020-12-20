@@ -170,6 +170,7 @@ const char* bme280_p_req  = "press_bme";
 const char* mhz19b_c_req  = "co2_mhz";
 const char* mhz19b_t_req  = "temp_mhz";
 const char* date_time_req = "date_time";
+const char* req_template  = "%s=%ld&%s=%ld&%s=%.2f&%s=%.2f&%s=%.2f&%s=%s";
 /* ------------------- MAIN function ------------------- */
 void app_main(void)
 {
@@ -981,7 +982,7 @@ static void mhz19b_check_task(void *arg)
 			continue;
 		}
 
-		mhz19b_co2  = mhz19_get_co2() * 0.4;
+		mhz19b_co2  = mhz19_get_co2();
 		mhz19b_temperature = mhz19_get_temperature();
 
 		ESP_LOGI(TAG_MHZ19B, "CO2: %d | Temperature: %d", mhz19b_co2, mhz19b_temperature);
@@ -1043,7 +1044,7 @@ static void http_request_task(void *arg)
 	{
 		update_time();
 		/* Create body of request to server */
-		asprintf(&request, "%s=%ld&%s=%ld&%s=%.2f&%s=%.2f&%s=%.2f&%s=%s",
+		asprintf(&request, req_template,
 				mhz19b_c_req, (long int) mhz19b_co2,
 				mhz19b_t_req, (long int) mhz19b_temperature,
 				bme280_t_req, bme280_temperature,
